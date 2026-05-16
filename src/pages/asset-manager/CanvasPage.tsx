@@ -277,6 +277,10 @@ export default function CanvasPage() {
     },
     onSuccess: () => {
       toast.success('Ticket reported');
+      // reflect the new condition immediately without a page refresh
+      setAssets(prev => prev.map(a =>
+        a.id === reportModal!.assetId ? { ...a, condition: 'Reported' } : a
+      ));
       setReportModal(null);
       setReportDesc('');
       setContextMenu(null);
@@ -381,12 +385,24 @@ export default function CanvasPage() {
                   style={{ position: 'absolute', left: contextMenu.x, top: contextMenu.y, zIndex: 50 }}
                   className="bg-white rounded-xl shadow-xl border border-gray-100 overflow-hidden w-44"
                 >
-                  <button
-                    className="flex items-center gap-2.5 w-full px-4 py-3 text-sm hover:bg-red-50 hover:text-red-600 transition-colors"
-                    onClick={() => { setReportModal({ assetId: contextMenu.assetId }); setContextMenu(null); }}
-                  >
-                    <AlertTriangle size={15} className="text-red-500" /> Report Issue
-                  </button>
+                  {(() => {
+                    const ctxAsset = assets.find(a => a.id === contextMenu.assetId);
+                    const hasActiveTicket = ctxAsset && ACTIVE_TICKET_CONDITIONS.has(ctxAsset.condition);
+                    return (
+                      <button
+                        disabled={!!hasActiveTicket}
+                        className={`flex items-center gap-2.5 w-full px-4 py-3 text-sm transition-colors ${
+                          hasActiveTicket
+                            ? 'opacity-40 cursor-not-allowed text-gray-400'
+                            : 'hover:bg-red-50 hover:text-red-600'
+                        }`}
+                        onClick={() => { if (!hasActiveTicket) { setReportModal({ assetId: contextMenu.assetId }); setContextMenu(null); } }}
+                      >
+                        <AlertTriangle size={15} className={hasActiveTicket ? 'text-gray-300' : 'text-red-500'} />
+                        {hasActiveTicket ? 'Already Reported' : 'Report Issue'}
+                      </button>
+                    );
+                  })()}
                   <button
                     className="flex items-center gap-2.5 w-full px-4 py-3 text-sm hover:bg-blue-50 hover:text-blue-600 transition-colors border-t border-gray-50"
                     onClick={() => { setChecklistModal({ assetId: contextMenu.assetId }); setContextMenu(null); }}
@@ -606,9 +622,18 @@ function ChecklistModalPanel({ assetId, onClose }: { assetId: string; onClose: (
     queryFn:  () => getChecklist(assetId),
   });
 
-  const toggle = async (checklistId: string, entryId: string, current: boolean) => {
-    await updateChecklistEntry(checklistId, entryId, !current);
-    refetch();
+  const [toggling, setToggling] = useState<string | null>(null);
+
+  const toggle = async (checklistId: string, checklistItemId: string, current: boolean) => {
+    setToggling(checklistItemId);
+    try {
+      await updateChecklistEntry(checklistId, checklistItemId, !current);
+      refetch();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.message ?? 'Failed to update checklist');
+    } finally {
+      setToggling(null);
+    }
   };
 
   return (
@@ -637,8 +662,9 @@ function ChecklistModalPanel({ assetId, onClose }: { assetId: string; onClose: (
                 <input
                   type="checkbox"
                   checked={entry.isChecked}
-                  onChange={() => toggle(data.id, entry.id, entry.isChecked)}
-                  className="mt-0.5 w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500 flex-shrink-0"
+                  disabled={toggling === entry.checklistItemId}
+                  onChange={() => toggle(data.id, entry.checklistItemId, entry.isChecked)}
+                  className="mt-0.5 w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500 flex-shrink-0 cursor-pointer disabled:cursor-wait"
                 />
                 <div className="flex-1">
                   <p className={`text-sm ${entry.isChecked ? 'line-through text-gray-400' : 'text-gray-700'}`}>
