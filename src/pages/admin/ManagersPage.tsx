@@ -11,6 +11,7 @@ import {
   createAssetManager, createDepartmentManager,
   listAssetManagers, listDeptManagers,
   reassignAssetManager, removeAssetManager,
+  reassignDeptManager, removeDeptManager,
 } from '../../api/admin';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
@@ -38,8 +39,10 @@ const dmSchema = z.object({
 });
 type DMForm = z.infer<typeof dmSchema>;
 
-const reassignSchema = z.object({ facultyId: z.string().min(1, 'Select a faculty') });
-type ReassignForm = z.infer<typeof reassignSchema>;
+const reassignSchema   = z.object({ facultyId:   z.string().min(1, 'Select a faculty') });
+const reassignDmSchema = z.object({ departmentId: z.string().min(1, 'Select a department') });
+type ReassignForm   = z.infer<typeof reassignSchema>;
+type ReassignDmForm = z.infer<typeof reassignDmSchema>;
 
 export default function ManagersPage() {
   const qc = useQueryClient();
@@ -51,7 +54,8 @@ export default function ManagersPage() {
 
   const [amOpen, setAmOpen]         = useState(false);
   const [dmOpen, setDmOpen]         = useState(false);
-  const [reassignTarget, setReassignTarget] = useState<AssetManagerAdmin | null>(null);
+  const [reassignTarget,   setReassignTarget]   = useState<AssetManagerAdmin | null>(null);
+  const [reassignDmTarget, setReassignDmTarget] = useState<DeptManagerAdmin | null>(null);
 
   // ── Data queries ──────────────────────────────────────────────────────────
   const { data: assetManagers, isLoading: amLoading } = useQuery({
@@ -117,6 +121,26 @@ export default function ManagersPage() {
     onError: (e: any) => toast.error(e?.response?.data?.message ?? 'Failed'),
   });
 
+  const reassignDmMut = useMutation({
+    mutationFn: ({ id, departmentId }: { id: string; departmentId: string }) =>
+      reassignDeptManager(id, departmentId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['dept-managers'] });
+      toast.success('Reassigned successfully');
+      setReassignDmTarget(null); reassignDmReset();
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.message ?? 'Failed'),
+  });
+
+  const removeDmMut = useMutation({
+    mutationFn: (id: string) => removeDeptManager(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['dept-managers'] });
+      toast.success('Department manager removed');
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.message ?? 'Failed'),
+  });
+
   // ── Forms ─────────────────────────────────────────────────────────────────
   const { register: amReg, handleSubmit: amSubmit, formState: { errors: amErr }, reset: amReset } =
     useForm<AMForm>({ resolver: zodResolver(amSchema) });
@@ -124,8 +148,11 @@ export default function ManagersPage() {
   const { register: dmReg, handleSubmit: dmSubmit, formState: { errors: dmErr }, reset: dmReset } =
     useForm<DMForm>({ resolver: zodResolver(dmSchema) });
 
-  const { register: rrReg, handleSubmit: rrSubmit, formState: { errors: rrErr }, reset: reassignReset } =
+  const { register: rrReg,  handleSubmit: rrSubmit,  formState: { errors: rrErr },  reset: reassignReset }   =
     useForm<ReassignForm>({ resolver: zodResolver(reassignSchema) });
+
+  const { register: rdrReg, handleSubmit: rdrSubmit, formState: { errors: rdrErr }, reset: reassignDmReset } =
+    useForm<ReassignDmForm>({ resolver: zodResolver(reassignDmSchema) });
 
   const facultyOptions = (faculties?.items ?? []).map(f => ({ value: f.id, label: f.name }));
   const deptOptions    = (departments?.items ?? []).map(d => ({ value: d.id, label: `${d.name} (${d.handles})` }));
@@ -288,7 +315,24 @@ export default function ManagersPage() {
                   </div>
                 ),
               },
-              { header: '', render: () => null },
+              {
+                header: '',
+                render: m => (
+                  <div className="flex gap-2 justify-end">
+                    <Button variant="secondary" size="sm" onClick={() => setReassignDmTarget(m)}>
+                      <RefreshCw size={13} /> Reassign
+                    </Button>
+                    <Button
+                      variant="ghost" size="sm"
+                      className="text-red-500 hover:bg-red-50 hover:text-red-600 px-2"
+                      onClick={() => removeDmMut.mutate(m.id)}
+                      loading={removeDmMut.isPending}
+                    >
+                      <UserMinus size={14} />
+                    </Button>
+                  </div>
+                ),
+              },
             ]}
           />
         </>
@@ -322,7 +366,45 @@ export default function ManagersPage() {
         </form>
       </Modal>
 
-      {/* ── Reassign modal ─────────────────────────────────────────────────── */}
+      {/* ── Reassign Dept Manager modal ───────────────────────────────────── */}
+      <Modal
+        open={!!reassignDmTarget}
+        onClose={() => { setReassignDmTarget(null); reassignDmReset(); }}
+        title={`Reassign — ${reassignDmTarget?.fullName ?? ''}`}
+      >
+        {reassignDmTarget && (
+          <>
+            <div className="mb-4 p-3 bg-amber-50 rounded-xl text-sm text-amber-700">
+              Currently assigned to <strong>{reassignDmTarget.departmentName}</strong>
+            </div>
+            <form
+              onSubmit={rdrSubmit(d =>
+                reassignDmMut.mutate({ id: reassignDmTarget.id, departmentId: d.departmentId })
+              )}
+              className="space-y-4"
+            >
+              <Select
+                label="New department"
+                placeholder="Select new department…"
+                options={deptOptions.filter(d => d.value !== reassignDmTarget.departmentId)}
+                error={rdrErr.departmentId?.message}
+                {...rdrReg('departmentId')}
+              />
+              <div className="flex gap-3 pt-2">
+                <Button type="button" variant="secondary" className="flex-1"
+                  onClick={() => { setReassignDmTarget(null); reassignDmReset(); }}>
+                  Cancel
+                </Button>
+                <Button type="submit" className="flex-1" loading={reassignDmMut.isPending}>
+                  Reassign
+                </Button>
+              </div>
+            </form>
+          </>
+        )}
+      </Modal>
+
+      {/* ── Reassign Asset Manager modal ───────────────────────────────────── */}
       <Modal
         open={!!reassignTarget}
         onClose={() => { setReassignTarget(null); reassignReset(); }}

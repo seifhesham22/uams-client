@@ -72,3 +72,9 @@ export const createDepartmentManager = (
 ) =>
   api.post('/admin/department-managers', { email, password, fullName, departmentId })
     .then(r => r.data);
+
+export const reassignDeptManager = (id: string, departmentId: string) =>
+  api.put(`/admin/dept-managers/${id}/department`, { DepartmentId: departmentId });
+
+export const removeDeptManager = (id: string) =>
+  api.delete(`/admin/dept-managers/${id}`);

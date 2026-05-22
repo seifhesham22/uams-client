@@ -18,7 +18,12 @@ import AMDashboardPage from './pages/asset-manager/DashboardPage';
 import AMBuildingsPage from './pages/asset-manager/BuildingsPage';
 import AMTeachersPage from './pages/asset-manager/TeachersPage';
 import AMStudentsPage from './pages/asset-manager/StudentsPage';
+import AMTicketsPage  from './pages/asset-manager/TicketsPage';
 import CanvasPage from './pages/asset-manager/CanvasPage';
+import { DeptManagerLayout } from './components/layout/DeptManagerLayout';
+import DMDashboardPage   from './pages/dept-manager/DashboardPage';
+import MaintainersPage   from './pages/dept-manager/MaintainersPage';
+import DMTicketsPage     from './pages/dept-manager/TicketsPage';
 import { useAuthStore } from './store/authStore';
 import type { Role } from './types';
 
@@ -58,8 +63,16 @@ export default function App() {
           <Route path="buildings"   element={<AMBuildingsPage />} />
           <Route path="teachers"    element={<AMTeachersPage />} />
           <Route path="students"    element={<AMStudentsPage />} />
+          <Route path="tickets"     element={<AMTicketsPage />} />
           {/* Canvas is full-screen — it uses position:fixed to cover the layout */}
           <Route path="rooms/:roomId" element={<CanvasPage />} />
+        </Route>
+
+        {/* ── Department Manager ───────────────────────────────────────────── */}
+        <Route path="/dept-manager" element={<RequireRole role="DepartmentManager"><DeptManagerLayout /></RequireRole>}>
+          <Route index                  element={<DMDashboardPage />} />
+          <Route path="maintainers"     element={<MaintainersPage />} />
+          <Route path="tickets"         element={<DMTicketsPage />} />
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />

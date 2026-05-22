@@ -20,6 +20,8 @@ const DEFAULT_W = 110;
 const DEFAULT_H = 55;
 const AUTOSAVE_MS = 15_000;
 const ACTIVE_TICKET_CONDITIONS = new Set(['Reported', 'UnderMaintenance']);
+const ZOOM_MIN = 0.25;
+const ZOOM_MAX = 3;
 
 // ── helper ────────────────────────────────────────────────────────────────────
 function newId() { return crypto.randomUUID(); }
@@ -36,7 +38,11 @@ export default function CanvasPage() {
   const facultyId   = user?.facultyId ?? '';
 
   const canvasRef     = useRef<HTMLDivElement>(null);
+  const canvasAreaRef = useRef<HTMLDivElement>(null);
   const interactionRef = useRef<InteractionState | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const zoomRef = useRef(1);
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
 
   const [assets,    setAssets]    = useState<CanvasAsset[]>([]);
   const [selected,  setSelected]  = useState<Set<string>>(new Set());
@@ -113,13 +119,26 @@ export default function CanvasPage() {
 
   const markUnsaved = () => setSaveStatus('unsaved');
 
+  // ── wheel zoom (Ctrl+scroll) ──────────────────────────────────────────────
+  useEffect(() => {
+    const el = canvasAreaRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      setZoom(z => parseFloat(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z - e.deltaY * 0.001)).toFixed(2)));
+    };
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
+  }, []);
+
   // ── mouse interaction ─────────────────────────────────────────────────────
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       const ia = interactionRef.current;
       if (!ia) return;
-      const dx = e.clientX - ia.startX;
-      const dy = e.clientY - ia.startY;
+      const dx = (e.clientX - ia.startX) / zoomRef.current;
+      const dy = (e.clientY - ia.startY) / zoomRef.current;
 
       if (ia.type === 'drag') {
         setAssets(prev => prev.map(a => {
@@ -139,10 +158,43 @@ export default function CanvasPage() {
         if (!rect) return;
         setAssets(prev => prev.map(a => {
           if (a.id !== ia.id) return a;
-          const cx = rect.left + a.x + a.w / 2;
-          const cy = rect.top  + a.y + a.h / 2;
+          const cx = rect.left + (a.x + a.w / 2) * zoomRef.current;
+          const cy = rect.top  + (a.y + a.h / 2) * zoomRef.current;
           const angle = Math.atan2(e.clientY - cy, e.clientX - cx) * 180 / Math.PI + 90;
           return { ...a, rotation: Math.round(angle) };
+        }));
+      } else if (ia.type === 'group-resize') {
+        const scaleX = Math.max(0.1, (ia.bbox.w + dx) / ia.bbox.w);
+        const scaleY = Math.max(0.1, (ia.bbox.h + dy) / ia.bbox.h);
+        setAssets(prev => prev.map(a => {
+          const orig = ia.origins.find(o => o.id === a.id);
+          if (!orig) return a;
+          return {
+            ...a,
+            x: ia.bbox.minX + (orig.x - ia.bbox.minX) * scaleX,
+            y: ia.bbox.minY + (orig.y - ia.bbox.minY) * scaleY,
+            w: Math.max(40, orig.w * scaleX),
+            h: Math.max(20, orig.h * scaleY),
+          };
+        }));
+      } else if (ia.type === 'group-rotate') {
+        const rect = canvasRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const currentAngle = Math.atan2(e.clientY - rect.top - ia.cy * zoomRef.current, e.clientX - rect.left - ia.cx * zoomRef.current);
+        const delta = currentAngle - ia.initialAngle;
+        setAssets(prev => prev.map(a => {
+          const orig = ia.origins.find(o => o.id === a.id);
+          if (!orig) return a;
+          const origCx = orig.x + orig.w / 2;
+          const origCy = orig.y + orig.h / 2;
+          const ddx = origCx - ia.cx;
+          const ddy = origCy - ia.cy;
+          return {
+            ...a,
+            x: (ia.cx + ddx * Math.cos(delta) - ddy * Math.sin(delta)) - a.w / 2,
+            y: (ia.cy + ddx * Math.sin(delta) + ddy * Math.cos(delta)) - a.h / 2,
+            rotation: Math.round(orig.rotation + delta * 180 / Math.PI),
+          };
         }));
       }
     };
@@ -168,8 +220,8 @@ export default function CanvasPage() {
     const def: { id: string; name: string; svgUrl: string; allowedLocations: string[] } = JSON.parse(raw);
 
     const rect = canvasRef.current!.getBoundingClientRect();
-    const x = Math.max(0, Math.min(CANVAS_W - DEFAULT_W, e.clientX - rect.left - DEFAULT_W / 2));
-    const y = Math.max(0, Math.min(CANVAS_H - DEFAULT_H, e.clientY - rect.top  - DEFAULT_H / 2));
+    const x = Math.max(0, Math.min(CANVAS_W - DEFAULT_W, (e.clientX - rect.left) / zoomRef.current - DEFAULT_W / 2));
+    const y = Math.max(0, Math.min(CANVAS_H - DEFAULT_H, (e.clientY - rect.top)  / zoomRef.current - DEFAULT_H / 2));
 
     // Placement rule: OnSurface must land on another asset
     if (def.allowedLocations.includes('OnSurface') &&
@@ -219,7 +271,7 @@ export default function CanvasPage() {
   const handleAssetDoubleClick = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     const rect = canvasRef.current!.getBoundingClientRect();
-    setContextMenu({ assetId: id, x: e.clientX - rect.left, y: e.clientY - rect.top });
+    setContextMenu({ assetId: id, x: (e.clientX - rect.left) / zoomRef.current, y: (e.clientY - rect.top) / zoomRef.current });
   };
 
   const handleResizeMouseDown = (e: React.MouseEvent, id: string) => {
@@ -231,6 +283,41 @@ export default function CanvasPage() {
   const handleRotateMouseDown = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     interactionRef.current = { type: 'rotate', id, startX: e.clientX, startY: e.clientY };
+  };
+
+  const handleGroupResizeMouseDown = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const sel = assets.filter(a => selected.has(a.id));
+    const minX = Math.min(...sel.map(a => a.x));
+    const minY = Math.min(...sel.map(a => a.y));
+    const maxX = Math.max(...sel.map(a => a.x + a.w));
+    const maxY = Math.max(...sel.map(a => a.y + a.h));
+    interactionRef.current = {
+      type: 'group-resize',
+      startX: e.clientX, startY: e.clientY,
+      origins: sel.map(a => ({ id: a.id, x: a.x, y: a.y, w: a.w, h: a.h })),
+      bbox: { minX, minY, w: maxX - minX, h: maxY - minY },
+    };
+  };
+
+  const handleGroupRotateMouseDown = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const sel = assets.filter(a => selected.has(a.id));
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const minX = Math.min(...sel.map(a => a.x));
+    const minY = Math.min(...sel.map(a => a.y));
+    const maxX = Math.max(...sel.map(a => a.x + a.w));
+    const maxY = Math.max(...sel.map(a => a.y + a.h));
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    interactionRef.current = {
+      type: 'group-rotate',
+      startX: e.clientX, startY: e.clientY,
+      origins: sel.map(a => ({ id: a.id, x: a.x, y: a.y, w: a.w, h: a.h, rotation: a.rotation })),
+      cx, cy,
+      initialAngle: Math.atan2(e.clientY - rect.top - cy * zoomRef.current, e.clientX - rect.left - cx * zoomRef.current),
+    };
   };
 
   // ── group ─────────────────────────────────────────────────────────────────
@@ -328,17 +415,24 @@ export default function CanvasPage() {
             </Button>
           </>
         )}
+        <div className="flex items-center gap-1 border border-gray-200 rounded-lg px-1">
+          <button onClick={() => setZoom(z => parseFloat(Math.max(ZOOM_MIN, z - 0.1).toFixed(1)))} className="px-2 py-1 text-sm hover:bg-gray-100 rounded">−</button>
+          <button onClick={() => setZoom(1)} className="text-xs text-gray-500 w-10 text-center hover:text-gray-800">{Math.round(zoom * 100)}%</button>
+          <button onClick={() => setZoom(z => parseFloat(Math.min(ZOOM_MAX, z + 0.1).toFixed(1)))} className="px-2 py-1 text-sm hover:bg-gray-100 rounded">+</button>
+        </div>
         <Button size="sm" onClick={() => doSave()}>
           <Save size={13} /> Save
         </Button>
       </div>
 
       {/* ── Canvas area ───────────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-auto pt-12">
-        <div className="min-h-full flex items-center justify-center p-8">
+      <div ref={canvasAreaRef} className="flex-1 overflow-auto pt-12">
+        <div className="flex items-center justify-center p-8" style={{ minHeight: '100%' }}>
+          {/* Space-reservation div so the scroll area grows with zoom */}
+          <div style={{ width: CANVAS_W * zoom, height: CANVAS_H * zoom, position: 'relative', flexShrink: 0 }}>
           <div
             ref={canvasRef}
-            style={{ width: CANVAS_W, height: CANVAS_H, position: 'relative', flexShrink: 0, backgroundColor: dragOver ? '#dbeafe' : '#e5edf2' }}
+            style={{ width: CANVAS_W, height: CANVAS_H, position: 'absolute', top: 0, left: 0, transform: `scale(${zoom})`, transformOrigin: '0 0', backgroundColor: dragOver ? '#dbeafe' : '#e5edf2' }}
             className={`rounded-xl shadow-lg border-2 transition-colors ${dragOver ? 'border-blue-400' : 'border-transparent'}`}
             onDrop={onCanvasDrop}
             onDragOver={e => { e.preventDefault(); setDragOver(true); }}
@@ -361,12 +455,22 @@ export default function CanvasPage() {
                 key={a.id}
                 asset={a}
                 isSelected={selected.has(a.id)}
+                showHandles={selected.size === 1}
                 onMouseDown={handleAssetMouseDown}
                 onDoubleClick={handleAssetDoubleClick}
                 onResizeMouseDown={handleResizeMouseDown}
                 onRotateMouseDown={handleRotateMouseDown}
               />
             ))}
+
+            {/* Group selection box — shown when 2+ assets selected */}
+            {selected.size > 1 && (
+              <GroupSelectionBox
+                assets={assets.filter(a => selected.has(a.id))}
+                onResizeMouseDown={handleGroupResizeMouseDown}
+                onRotateMouseDown={handleGroupRotateMouseDown}
+              />
+            )}
 
             {/* Empty hint */}
             {assets.length === 0 && (
@@ -405,7 +509,7 @@ export default function CanvasPage() {
                   })()}
                   <button
                     className="flex items-center gap-2.5 w-full px-4 py-3 text-sm hover:bg-blue-50 hover:text-blue-600 transition-colors border-t border-gray-50"
-                    onClick={() => { setChecklistModal({ assetId: contextMenu.assetId }); setContextMenu(null); }}
+                    onClick={async () => { if (saveStatus === 'unsaved') await doSave(); setChecklistModal({ assetId: contextMenu.assetId }); setContextMenu(null); }}
                   >
                     <CheckSquare size={15} className="text-blue-500" /> View Checklist
                   </button>
@@ -413,6 +517,7 @@ export default function CanvasPage() {
               )}
             </AnimatePresence>
           </div>
+          </div>{/* end space-reservation */}
         </div>
       </div>
 
@@ -465,17 +570,50 @@ export default function CanvasPage() {
   );
 }
 
+// ── Group selection box ───────────────────────────────────────────────────────
+function GroupSelectionBox({ assets, onResizeMouseDown, onRotateMouseDown }: {
+  assets: CanvasAsset[];
+  onResizeMouseDown: (e: React.MouseEvent) => void;
+  onRotateMouseDown: (e: React.MouseEvent) => void;
+}) {
+  const minX = Math.min(...assets.map(a => a.x));
+  const minY = Math.min(...assets.map(a => a.y));
+  const maxX = Math.max(...assets.map(a => a.x + a.w));
+  const maxY = Math.max(...assets.map(a => a.y + a.h));
+  const pad  = 10;
+  return (
+    <div
+      style={{ position: 'absolute', left: minX - pad, top: minY - pad, width: maxX - minX + pad * 2, height: maxY - minY + pad * 2, zIndex: 25, pointerEvents: 'none' }}
+      className="border-2 border-blue-400 border-dashed rounded-lg"
+    >
+      <div
+        style={{ position: 'absolute', top: -24, left: '50%', transform: 'translateX(-50%)', pointerEvents: 'all' }}
+        className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center cursor-grab hover:bg-blue-600 shadow"
+        onMouseDown={onRotateMouseDown}
+      >
+        <RotateCw size={12} className="text-white" />
+      </div>
+      <div
+        style={{ position: 'absolute', bottom: -5, right: -5, pointerEvents: 'all' }}
+        className="w-4 h-4 rounded-sm bg-blue-500 cursor-se-resize shadow"
+        onMouseDown={onResizeMouseDown}
+      />
+    </div>
+  );
+}
+
 // ── Placed asset element ──────────────────────────────────────────────────────
 interface PlacedAssetElProps {
   asset: CanvasAsset;
   isSelected: boolean;
+  showHandles: boolean;
   onMouseDown: (e: React.MouseEvent, id: string) => void;
   onDoubleClick: (e: React.MouseEvent, id: string) => void;
   onResizeMouseDown: (e: React.MouseEvent, id: string) => void;
   onRotateMouseDown: (e: React.MouseEvent, id: string) => void;
 }
 
-function PlacedAssetEl({ asset: a, isSelected, onMouseDown, onDoubleClick, onResizeMouseDown, onRotateMouseDown }: PlacedAssetElProps) {
+function PlacedAssetEl({ asset: a, isSelected, showHandles, onMouseDown, onDoubleClick, onResizeMouseDown, onRotateMouseDown }: PlacedAssetElProps) {
   const conditionBorder: Record<string, string> = {
     Good:     'border-transparent',
     Reported: 'border-red-400',
@@ -527,7 +665,7 @@ function PlacedAssetEl({ asset: a, isSelected, onMouseDown, onDoubleClick, onRes
         </div>
       )}
 
-      {isSelected && (
+      {isSelected && showHandles && (
         <>
           {/* Rotation handle */}
           <div
@@ -714,9 +852,11 @@ function Modal({ title, children, onClose, wide }: {
 
 // ── Interaction state types ───────────────────────────────────────────────────
 type InteractionState =
-  | { type: 'drag';   ids: string[]; startX: number; startY: number; origins: { id: string; x: number; y: number }[] }
-  | { type: 'resize'; id: string;   startX: number; startY: number; ow: number; oh: number }
-  | { type: 'rotate'; id: string;   startX: number; startY: number };
+  | { type: 'drag';         ids: string[]; startX: number; startY: number; origins: { id: string; x: number; y: number }[] }
+  | { type: 'resize';       id: string;   startX: number; startY: number; ow: number; oh: number }
+  | { type: 'rotate';       id: string;   startX: number; startY: number }
+  | { type: 'group-resize'; startX: number; startY: number; origins: { id: string; x: number; y: number; w: number; h: number }[]; bbox: { minX: number; minY: number; w: number; h: number } }
+  | { type: 'group-rotate'; startX: number; startY: number; origins: { id: string; x: number; y: number; w: number; h: number; rotation: number }[]; cx: number; cy: number; initialAngle: number };
 
 // ── Category colour helper ────────────────────────────────────────────────────
 function useCategoryColor() {

@@ -1,28 +1,26 @@
 import { motion } from 'framer-motion';
-import { LayoutDashboard, Building2, Users, GraduationCap, Ticket, LogOut, ChevronRight, Menu, X } from 'lucide-react';
+import { LayoutDashboard, Users, Ticket, LogOut, ChevronRight, Menu, X } from 'lucide-react';
 import { useState } from 'react';
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
 import { useAuthStore } from '../../store/authStore';
-import { getAmActionCount } from '../../api/assetManager';
+import { useQuery } from '@tanstack/react-query';
+import { getActionCount } from '../../api/deptManager';
 
 const NAV = [
-  { to: '/asset-manager',           icon: LayoutDashboard, label: 'Dashboard',       end: true },
-  { to: '/asset-manager/buildings', icon: Building2,        label: 'Buildings & Rooms'          },
-  { to: '/asset-manager/teachers',  icon: GraduationCap,   label: 'Teachers'                   },
-  { to: '/asset-manager/students',  icon: Users,            label: 'Students'                   },
-  { to: '/asset-manager/tickets',   icon: Ticket,           label: 'Tickets'                    },
+  { to: '/dept-manager',             icon: LayoutDashboard, label: 'Dashboard',   end: true },
+  { to: '/dept-manager/maintainers', icon: Users,           label: 'Maintainers'         },
+  { to: '/dept-manager/tickets',     icon: Ticket,          label: 'Tickets'             },
 ];
 
-export function AssetManagerLayout() {
-  const { user, logout } = useAuthStore();
-  const navigate          = useNavigate();
-  const { pathname }      = useLocation();
+export function DeptManagerLayout() {
+  const { user, logout }  = useAuthStore();
+  const navigate           = useNavigate();
+  const { pathname }       = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const { data: actionCount = 0 } = useQuery({
-    queryKey: ['am-action-count'],
-    queryFn: getAmActionCount,
+    queryKey: ['dept-action-count'],
+    queryFn: getActionCount,
     refetchInterval: 30_000,
   });
 
@@ -32,12 +30,12 @@ export function AssetManagerLayout() {
     <div className="flex flex-col h-full">
       <div className="px-6 py-5 border-b border-gray-100">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+          <div className="w-8 h-8 bg-violet-600 rounded-lg flex items-center justify-center">
             <span className="text-white font-bold text-sm">U</span>
           </div>
           <div>
             <p className="font-bold text-gray-900 text-sm leading-none">UAMS</p>
-            <p className="text-xs text-gray-400 mt-0.5">Asset Manager</p>
+            <p className="text-xs text-gray-400 mt-0.5">Dept. Manager</p>
           </div>
         </div>
       </div>
@@ -51,22 +49,20 @@ export function AssetManagerLayout() {
             onClick={() => setMobileOpen(false)}
             className={({ isActive }) =>
               `flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all group ${
-                isActive
-                  ? 'bg-blue-50 text-blue-700'
-                  : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                isActive ? 'bg-violet-50 text-violet-700' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
               }`
             }
           >
             {({ isActive }) => (
               <>
-                <Icon size={18} className={isActive ? 'text-blue-600' : 'text-gray-400 group-hover:text-gray-600'} />
+                <Icon size={18} className={isActive ? 'text-violet-600' : 'text-gray-400 group-hover:text-gray-600'} />
                 <span className="flex-1">{label}</span>
                 {label === 'Tickets' && actionCount > 0 && (
                   <span className="text-xs bg-red-500 text-white rounded-full px-1.5 py-0.5 min-w-[18px] text-center leading-none">
                     {actionCount}
                   </span>
                 )}
-                {isActive && <ChevronRight size={14} className="text-blue-400" />}
+                {isActive && <ChevronRight size={14} className="text-violet-400" />}
               </>
             )}
           </NavLink>
@@ -75,12 +71,12 @@ export function AssetManagerLayout() {
 
       <div className="px-3 py-4 border-t border-gray-100">
         <div className="flex items-center gap-3 px-3 py-2 mb-1">
-          <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-700 font-semibold text-sm">
-            {user?.email?.[0]?.toUpperCase() ?? 'A'}
+          <div className="w-8 h-8 rounded-full bg-violet-100 flex items-center justify-center text-violet-700 font-semibold text-sm">
+            {user?.email?.[0]?.toUpperCase() ?? 'D'}
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-gray-900 truncate">{user?.email}</p>
-            <p className="text-xs text-gray-400">Asset Manager</p>
+            <p className="text-xs text-gray-400">Dept. Manager</p>
           </div>
         </div>
         <button
@@ -120,9 +116,7 @@ export function AssetManagerLayout() {
         </header>
 
         <main className="flex-1 overflow-y-auto">
-          {/* Canvas route renders its own full-screen overlay — skip the motion wrapper
-              because transform on a parent breaks position:fixed for descendants */}
-          {pathname.startsWith('/asset-manager/rooms/') ? (
+          {pathname.startsWith('/dept-manager/rooms/') ? (
             <Outlet />
           ) : (
             <motion.div

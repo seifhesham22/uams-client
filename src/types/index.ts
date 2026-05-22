@@ -148,6 +148,62 @@ export interface PanelCategory {
   }[];
 }
 
+export interface TicketNote {
+  id: string;
+  authorId: string;
+  authorName: string;
+  content: string;
+  createdAtUtc: string;
+}
+
+// ── Asset Manager ticket types ────────────────────────────────────────────────
+export interface AMTicket {
+  id: string;
+  assetName: string;
+  roomName: string;
+  facultyId: string;
+  reportedByName: string;
+  status: string;
+  decision: string;
+  assignedToDepartmentId: string | null;
+  departmentName: string | null;
+  currentMaintainerId: string | null;
+  currentMaintainerName: string | null;
+  createdAtUtc: string;
+  updatedAtUtc: string;
+  notes: TicketNote[];
+}
+
+// ── Department Manager portal types ──────────────────────────────────────────
+export interface DeptMaintainer {
+  id: string;
+  userId: string;
+  fullName: string;
+  isActive: boolean;
+  departmentId: string;
+  vkId?: string | null;
+}
+
+export type VkNotificationStatus = 'None' | 'Sent' | 'Failed';
+
+export interface DeptTicket {
+  id: string;
+  assetName: string;
+  roomId: string;
+  roomName: string;
+  facultyId: string;
+  facultyName: string;
+  buildingName: string;
+  status: string;
+  decision: string;
+  currentMaintainerId: string | null;
+  currentMaintainerName: string | null;
+  createdAtUtc: string;
+  updatedAtUtc: string;
+  vkNotificationStatus: VkNotificationStatus;
+  notes: TicketNote[];
+}
+
 export interface ChecklistView {
   id: string;
   placedAssetId: string;

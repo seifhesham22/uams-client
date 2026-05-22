@@ -1,5 +1,5 @@
 import api from './client';
-import type { PagedResult, FacultyInfo, AMBuilding, AMRoom, AMTeacher, AMTeacherSearch, AMStudent } from '../types';
+import type { PagedResult, FacultyInfo, AMBuilding, AMRoom, AMTeacher, AMTeacherSearch, AMStudent, AMTicket } from '../types';
 
 // Base path matches the C# controller name: AssetManagerController → /api/assetmanager
 const AM = '/assetmanager';
@@ -36,3 +36,28 @@ export const getMyStudents = (page = 1, pageSize = 20) =>
   api.get<PagedResult<AMStudent>>(`${AM}/student/my`, {
     params: { page, pageSize },
   }).then(r => r.data);
+
+// ── Tickets ───────────────────────────────────────────────────────────────────
+export const getMyTickets = (needsAction = false) =>
+  api.get<AMTicket[]>(`${AM}/tickets`, { params: { needsAction } }).then(r => r.data);
+
+export const getAmActionCount = () =>
+  api.get<{ count: number }>(`${AM}/tickets/action-count`).then(r => r.data.count);
+
+export const sendForInspection = (ticketId: string, departmentId: string, note?: string) =>
+  api.post(`/tickets/${ticketId}/send-for-inspection`, { DepartmentId: departmentId, Note: note });
+
+export const sendForFix = (ticketId: string, departmentId: string, note?: string) =>
+  api.post(`/tickets/${ticketId}/send-for-fix`, { DepartmentId: departmentId, Note: note });
+
+export const sendForReplacement = (ticketId: string, departmentId: string, note?: string) =>
+  api.post(`/tickets/${ticketId}/send-for-replacement`, { DepartmentId: departmentId, Note: note });
+
+export const escalateTicket = (ticketId: string, note?: string) =>
+  api.post(`/tickets/${ticketId}/escalate`, { Note: note });
+
+export const confirmFix = (ticketId: string) =>
+  api.post(`/tickets/${ticketId}/confirm-fix`);
+
+export const closeTicket = (ticketId: string, note?: string) =>
+  api.post(`/tickets/${ticketId}/close`, { Note: note });
