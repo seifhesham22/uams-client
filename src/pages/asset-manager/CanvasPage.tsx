@@ -42,8 +42,9 @@ export default function CanvasPage() {
   const canvasRef     = useRef<HTMLDivElement>(null);
   const canvasAreaRef = useRef<HTMLDivElement>(null);
   const interactionRef = useRef<InteractionState | null>(null);
-  const panRef = useRef<{ startX: number; startY: number; startScrollLeft: number; startScrollTop: number } | null>(null);
+  const panRef = useRef<{ startX: number; startY: number; startPanX: number; startPanY: number } | null>(null);
   const [zoom, setZoom] = useState(1);
+  const [pan,  setPan]  = useState({ x: 0, y: 0 });
   const zoomRef = useRef(1);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
 
@@ -154,24 +155,16 @@ export default function CanvasPage() {
 
   const markUnsaved = () => setSaveStatus('unsaved');
 
-  // Block browser Ctrl+zoom globally (bubble phase — fires after canvas handler).
+  // Capture-phase document listener: zoom canvas on any scroll inside the canvas area.
+  // Capture phase fires before passive optimisations on any child element.
   useEffect(() => {
-    const block = (e: WheelEvent) => { if (e.ctrlKey) e.preventDefault(); };
-    document.addEventListener('wheel', block, { passive: false });
-    return () => document.removeEventListener('wheel', block);
-  }, []);
-
-  // Ctrl+scroll inside the canvas area = zoom; plain scroll = pan (container scrolls).
-  useEffect(() => {
-    const el = canvasAreaRef.current;
-    if (!el) return;
     const handler = (e: WheelEvent) => {
-      if (!e.ctrlKey) return;
+      if (!canvasAreaRef.current?.contains(e.target as Node)) return;
       e.preventDefault();
       setZoom(z => parseFloat(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z - e.deltaY * 0.002)).toFixed(2)));
     };
-    el.addEventListener('wheel', handler, { passive: false });
-    return () => el.removeEventListener('wheel', handler);
+    document.addEventListener('wheel', handler, { passive: false, capture: true });
+    return () => document.removeEventListener('wheel', handler, { capture: true });
   }, []);
 
   // ── mouse interaction ─────────────────────────────────────────────────────
@@ -180,11 +173,7 @@ export default function CanvasPage() {
       // Right-click pan
       if (panRef.current) {
         const p = panRef.current;
-        const el = canvasAreaRef.current;
-        if (el) {
-          el.scrollLeft = p.startScrollLeft - (e.clientX - p.startX);
-          el.scrollTop  = p.startScrollTop  - (e.clientY - p.startY);
-        }
+        setPan({ x: p.startPanX + (e.clientX - p.startX), y: p.startPanY + (e.clientY - p.startY) });
       }
 
       const ia = interactionRef.current;
@@ -357,8 +346,8 @@ export default function CanvasPage() {
 
   const handleAssetDoubleClick = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    const rect = canvasRef.current!.getBoundingClientRect();
-    setContextMenu({ assetId: id, x: (e.clientX - rect.left) / zoomRef.current, y: (e.clientY - rect.top) / zoomRef.current });
+    const areaRect = canvasAreaRef.current!.getBoundingClientRect();
+    setContextMenu({ assetId: id, x: e.clientX - areaRect.left, y: e.clientY - areaRect.top });
   };
 
   const handleResizeMouseDown = (e: React.MouseEvent, id: string, dir: ResizeDir) => {
@@ -539,118 +528,121 @@ export default function CanvasPage() {
         </Button>
       </div>
 
-      {/* ── Canvas area ───────────────────────────────────────────────────── */}
+      {/* ── Canvas area — fills full viewport, no scroll ─────────────────── */}
       <div
         ref={canvasAreaRef}
-        className="flex-1 overflow-auto pt-12"
+        className="flex-1 overflow-hidden pt-12 relative"
+        style={{ background: dragOver ? '#dbeafe' : '#e5edf2' }}
         onContextMenu={e => e.preventDefault()}
         onMouseDown={e => {
-          if (e.button === 2) {
-            const el = canvasAreaRef.current!;
-            panRef.current = { startX: e.clientX, startY: e.clientY, startScrollLeft: el.scrollLeft, startScrollTop: el.scrollTop };
-          }
+          if (e.button === 2)
+            panRef.current = { startX: e.clientX, startY: e.clientY, startPanX: pan.x, startPanY: pan.y };
         }}
       >
-        <div className="flex items-center justify-center p-8" style={{ minHeight: '100%' }}>
-          {/* Space-reservation div so the scroll area grows with zoom */}
-          <div style={{ width: CANVAS_W * zoom, height: CANVAS_H * zoom, position: 'relative', flexShrink: 0 }}>
-          <div
-            ref={canvasRef}
-            style={{ width: CANVAS_W, height: CANVAS_H, position: 'absolute', top: 0, left: 0, transform: `scale(${zoom})`, transformOrigin: '0 0', backgroundColor: dragOver ? '#dbeafe' : '#e5edf2' }}
-            className={`rounded-xl shadow-lg border-2 transition-colors ${dragOver ? 'border-blue-400' : 'border-transparent'}`}
-            onDrop={onCanvasDrop}
-            onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onMouseDown={() => { setSelected(new Set()); setContextMenu(null); }}
-          >
-            {/* Grid lines */}
-            <svg className="absolute inset-0 w-full h-full pointer-events-none opacity-20" xmlns="http://www.w3.org/2000/svg">
-              <defs>
-                <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-                  <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#94a3b8" strokeWidth="0.5"/>
-                </pattern>
-              </defs>
-              <rect width="100%" height="100%" fill="url(#grid)" />
-            </svg>
+        {/* Grid — full viewport */}
+        <svg className="absolute inset-0 w-full h-full pointer-events-none opacity-20" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+              <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#94a3b8" strokeWidth="0.5"/>
+            </pattern>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#grid)" />
+        </svg>
 
-            {/* Placed assets */}
-            {assets.map(a => (
-              <PlacedAssetEl
-                key={a.id}
-                asset={a}
-                isSelected={selected.has(a.id)}
-                showHandles={selected.size === 1}
-                onMouseDown={handleAssetMouseDown}
-                onDoubleClick={handleAssetDoubleClick}
-                onResizeMouseDown={handleResizeMouseDown}
-                onRotateMouseDown={handleRotateMouseDown}
-                onNameChange={handleNameChange}
-              />
-            ))}
+        {/* Canvas — centered, panned and scaled */}
+        <div
+          ref={canvasRef}
+          style={{
+            width: CANVAS_W, height: CANVAS_H,
+            position: 'absolute',
+            left: '50%', top: '50%',
+            transform: `translate(calc(-50% + ${pan.x}px), calc(-50% + ${pan.y}px)) scale(${zoom})`,
+            transformOrigin: 'center center',
+          }}
+          onDrop={onCanvasDrop}
+          onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onMouseDown={() => { setSelected(new Set()); setContextMenu(null); }}
+        >
+          {/* Placed assets */}
+          {assets.map(a => (
+            <PlacedAssetEl
+              key={a.id}
+              asset={a}
+              isSelected={selected.has(a.id)}
+              showHandles={selected.size === 1}
+              zoom={zoom}
+              onMouseDown={handleAssetMouseDown}
+              onDoubleClick={handleAssetDoubleClick}
+              onResizeMouseDown={handleResizeMouseDown}
+              onRotateMouseDown={handleRotateMouseDown}
+              onNameChange={handleNameChange}
+            />
+          ))}
 
-            {/* Group selection box — shown when 2+ assets selected */}
-            {selected.size > 1 && (
-              <GroupSelectionBox
-                assets={assets.filter(a => selected.has(a.id))}
-                onResizeMouseDown={handleGroupResizeMouseDown}
-                onRotateMouseDown={handleGroupRotateMouseDown}
-              />
-            )}
+          {/* Group selection box — shown when 2+ assets selected */}
+          {selected.size > 1 && (
+            <GroupSelectionBox
+              assets={assets.filter(a => selected.has(a.id))}
+              onResizeMouseDown={handleGroupResizeMouseDown}
+              onRotateMouseDown={handleGroupRotateMouseDown}
+              zoom={zoom}
+            />
+          )}
 
-            {/* Empty hint */}
-            {assets.length === 0 && (
-              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <p className="text-gray-300 text-lg font-medium">Drag assets from the panel →</p>
-              </div>
-            )}
+          {/* Empty hint */}
+          {assets.length === 0 && (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <p className="text-gray-300 text-lg font-medium">Drag assets from the panel →</p>
+            </div>
+          )}
 
-            {/* Context menu */}
-            <AnimatePresence>
-              {contextMenu && (
-                <motion.div
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.9 }}
-                  style={{ position: 'absolute', left: contextMenu.x, top: contextMenu.y, zIndex: 50 }}
-                  className="bg-white rounded-xl shadow-xl border border-gray-100 overflow-hidden w-44"
-                >
-                  {(() => {
-                    const ctxAsset = assets.find(a => a.id === contextMenu.assetId);
-                    const hasActiveTicket = ctxAsset && ACTIVE_TICKET_CONDITIONS.has(ctxAsset.condition);
-                    const isInfrastructure = ctxAsset?.category === 'Infrastructure';
-                    return !isInfrastructure ? (
-                      <button
-                        disabled={!!hasActiveTicket}
-                        className={`flex items-center gap-2.5 w-full px-4 py-3 text-sm transition-colors ${
-                          hasActiveTicket
-                            ? 'opacity-40 cursor-not-allowed text-gray-400'
-                            : 'hover:bg-red-50 hover:text-red-600'
-                        }`}
-                        onClick={() => { if (!hasActiveTicket) { setReportModal({ assetId: contextMenu.assetId }); setContextMenu(null); } }}
-                      >
-                        <AlertTriangle size={15} className={hasActiveTicket ? 'text-gray-300' : 'text-red-500'} />
-                        {hasActiveTicket ? 'Already Reported' : 'Report Issue'}
-                      </button>
-                    ) : null;
-                  })()}
-                  <button
-                    className="flex items-center gap-2.5 w-full px-4 py-3 text-sm hover:bg-green-50 hover:text-green-600 transition-colors border-t border-gray-50"
-                    onClick={() => { duplicateAsset(contextMenu.assetId); setContextMenu(null); }}
-                  >
-                    <Copy size={15} className="text-green-500" /> Duplicate
-                  </button>
-                  <button
-                    className="flex items-center gap-2.5 w-full px-4 py-3 text-sm hover:bg-blue-50 hover:text-blue-600 transition-colors border-t border-gray-50"
-                    onClick={async () => { if (saveStatus === 'unsaved') await doSave(); setChecklistModal({ assetId: contextMenu.assetId }); setContextMenu(null); }}
-                  >
-                    <CheckSquare size={15} className="text-blue-500" /> View Checklist
-                  </button>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-          </div>{/* end space-reservation */}
         </div>
+
+        {/* Context menu — outside canvasRef so it is never affected by zoom */}
+        <AnimatePresence>
+          {contextMenu && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              style={{ position: 'absolute', left: contextMenu.x, top: contextMenu.y, zIndex: 50 }}
+              className="bg-white rounded-xl shadow-xl border border-gray-100 overflow-hidden w-44"
+            >
+              {(() => {
+                const ctxAsset = assets.find(a => a.id === contextMenu.assetId);
+                const hasActiveTicket = ctxAsset && ACTIVE_TICKET_CONDITIONS.has(ctxAsset.condition);
+                const isInfrastructure = ctxAsset?.category === 'Infrastructure';
+                return !isInfrastructure ? (
+                  <button
+                    disabled={!!hasActiveTicket}
+                    className={`flex items-center gap-2.5 w-full px-4 py-3 text-sm transition-colors ${
+                      hasActiveTicket
+                        ? 'opacity-40 cursor-not-allowed text-gray-400'
+                        : 'hover:bg-red-50 hover:text-red-600'
+                    }`}
+                    onClick={() => { if (!hasActiveTicket) { setReportModal({ assetId: contextMenu.assetId }); setContextMenu(null); } }}
+                  >
+                    <AlertTriangle size={15} className={hasActiveTicket ? 'text-gray-300' : 'text-red-500'} />
+                    {hasActiveTicket ? 'Already Reported' : 'Report Issue'}
+                  </button>
+                ) : null;
+              })()}
+              <button
+                className="flex items-center gap-2.5 w-full px-4 py-3 text-sm hover:bg-green-50 hover:text-green-600 transition-colors border-t border-gray-50"
+                onClick={() => { duplicateAsset(contextMenu.assetId); setContextMenu(null); }}
+              >
+                <Copy size={15} className="text-green-500" /> Duplicate
+              </button>
+              <button
+                className="flex items-center gap-2.5 w-full px-4 py-3 text-sm hover:bg-blue-50 hover:text-blue-600 transition-colors border-t border-gray-50"
+                onClick={async () => { if (saveStatus === 'unsaved') await doSave(); setChecklistModal({ assetId: contextMenu.assetId }); setContextMenu(null); }}
+              >
+                <CheckSquare size={15} className="text-blue-500" /> View Checklist
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* ── Right panel ───────────────────────────────────────────────────── */}
@@ -711,31 +703,34 @@ export default function CanvasPage() {
 }
 
 // ── Group selection box ───────────────────────────────────────────────────────
-function GroupSelectionBox({ assets, onResizeMouseDown, onRotateMouseDown }: {
+function GroupSelectionBox({ assets, onResizeMouseDown, onRotateMouseDown, zoom }: {
   assets: CanvasAsset[];
   onResizeMouseDown: (e: React.MouseEvent) => void;
   onRotateMouseDown: (e: React.MouseEvent) => void;
+  zoom: number;
 }) {
   const minX = Math.min(...assets.map(a => a.x));
   const minY = Math.min(...assets.map(a => a.y));
   const maxX = Math.max(...assets.map(a => a.x + a.w));
   const maxY = Math.max(...assets.map(a => a.y + a.h));
-  const pad  = 10;
+  const pad  = 10 / zoom;
+  const rh   = 24 / zoom;
+  const rs   = 16 / zoom;
   return (
     <div
       style={{ position: 'absolute', left: minX - pad, top: minY - pad, width: maxX - minX + pad * 2, height: maxY - minY + pad * 2, zIndex: 25, pointerEvents: 'none' }}
       className="border-2 border-blue-400 border-dashed rounded-lg"
     >
       <div
-        style={{ position: 'absolute', top: -24, left: '50%', transform: 'translateX(-50%)', pointerEvents: 'all' }}
-        className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center cursor-grab hover:bg-blue-600 shadow"
+        style={{ position: 'absolute', top: -(rh + 6 / zoom), left: '50%', transform: 'translateX(-50%)', width: rh, height: rh, borderRadius: '50%', pointerEvents: 'all' }}
+        className="bg-blue-500 flex items-center justify-center cursor-grab hover:bg-blue-600 shadow"
         onMouseDown={onRotateMouseDown}
       >
-        <RotateCw size={12} className="text-white" />
+        <RotateCw size={12 / zoom} className="text-white" />
       </div>
       <div
-        style={{ position: 'absolute', bottom: -5, right: -5, pointerEvents: 'all' }}
-        className="w-4 h-4 rounded-sm bg-blue-500 cursor-se-resize shadow"
+        style={{ position: 'absolute', bottom: -rs / 2, right: -rs / 2, width: rs, height: rs, borderRadius: 2 / zoom, pointerEvents: 'all' }}
+        className="bg-blue-500 cursor-se-resize shadow"
         onMouseDown={onResizeMouseDown}
       />
     </div>
@@ -747,6 +742,7 @@ interface PlacedAssetElProps {
   asset: CanvasAsset;
   isSelected: boolean;
   showHandles: boolean;
+  zoom: number;
   onMouseDown: (e: React.MouseEvent, id: string) => void;
   onDoubleClick: (e: React.MouseEvent, id: string) => void;
   onResizeMouseDown: (e: React.MouseEvent, id: string, dir: ResizeDir) => void;
@@ -754,7 +750,7 @@ interface PlacedAssetElProps {
   onNameChange: (id: string, name: string) => void;
 }
 
-function PlacedAssetEl({ asset: a, isSelected, showHandles, onMouseDown, onDoubleClick, onResizeMouseDown, onRotateMouseDown, onNameChange }: PlacedAssetElProps) {
+function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, onDoubleClick, onResizeMouseDown, onRotateMouseDown, onNameChange }: PlacedAssetElProps) {
   const conditionBorder: Record<string, string> = {
     Good:             'border-transparent',
     Reported:         'border-amber-400',
@@ -767,6 +763,12 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, onMouseDown, onDoubl
     : a.allowedLocations.includes('UnderSurface')                                   ? 3
     : a.allowedLocations.length > 0 && a.allowedLocations.every(l => l === 'OnSurface') ? 10
     : 5;
+
+  // Handle sizes in canvas coords so they appear constant on screen regardless of zoom.
+  const hs  = 10 / zoom;   // resize handle size
+  const ho  = -5 / zoom;   // resize handle edge offset
+  const rh  = 24 / zoom;   // rotation handle diameter
+  const rOff = -(rh + 6 / zoom); // rotation handle top offset
 
   return (
     <div
@@ -786,25 +788,26 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, onMouseDown, onDoubl
       onMouseDown={e => onMouseDown(e, a.id)}
       onDoubleClick={e => onDoubleClick(e, a.id)}
     >
-      {/* SVG image — key forces remount if URL changes after initial render */}
+      {/* SVG fills the asset bounds directly — no letterboxing */}
       <img
         key={a.svgUrl}
         src={toDirectUrl(a.svgUrl)}
         alt={a.assetName}
         draggable={false}
-        className="w-full h-full object-contain p-1 pointer-events-none"
+        className="w-full h-full object-fill pointer-events-none"
         onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
       />
 
       {/* Name — hidden until selected; editable inline */}
       {isSelected && showHandles && (
         <div
-          className="absolute -bottom-7 left-0 right-0 text-center"
+          style={{ position: 'absolute', bottom: -(28 / zoom), left: 0, right: 0, textAlign: 'center' }}
           onMouseDown={e => e.stopPropagation()}
           onClick={e => e.stopPropagation()}
         >
           <input
-            className="text-xs bg-white border border-blue-300 rounded px-1 text-center w-full focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-700"
+            style={{ fontSize: 12 / zoom, height: 20 / zoom, padding: `0 ${4 / zoom}px`, borderRadius: 4 / zoom, borderWidth: 1 / zoom }}
+            className="bg-white border-blue-300 text-center w-full focus:outline-none text-gray-700"
             value={a.assetName}
             onChange={e => onNameChange(a.id, e.target.value)}
           />
@@ -813,8 +816,8 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, onMouseDown, onDoubl
 
       {/* Group badge */}
       {a.groupLabel && (
-        <div className="absolute -top-5 left-0 pointer-events-none">
-          <span className="text-xs bg-violet-100 text-violet-700 px-1 rounded">{a.groupLabel}</span>
+        <div style={{ position: 'absolute', top: -20 / zoom, left: 0 }} className="pointer-events-none">
+          <span style={{ fontSize: 12 / zoom, padding: `0 ${4 / zoom}px` }} className="bg-violet-100 text-violet-700 rounded">{a.groupLabel}</span>
         </div>
       )}
 
@@ -822,22 +825,21 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, onMouseDown, onDoubl
         <>
           {/* Rotation handle */}
           <div
-            style={{ position: 'absolute', top: -24, left: '50%', transform: 'translateX(-50%)' }}
-            className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center cursor-grab hover:bg-blue-600 shadow"
+            style={{ position: 'absolute', top: rOff, left: '50%', transform: 'translateX(-50%)', width: rh, height: rh, borderRadius: '50%' }}
+            className="bg-blue-500 flex items-center justify-center cursor-grab hover:bg-blue-600 shadow"
             onMouseDown={e => onRotateMouseDown(e, a.id)}
           >
-            <RotateCw size={12} className="text-white" />
+            <RotateCw size={12 / zoom} className="text-white" />
           </div>
-          {/* Resize handles — 8 directions */}
+          {/* Resize handles — 8 directions, all zoom-invariant */}
           {(['nw','n','ne','e','se','s','sw','w'] as ResizeDir[]).map(dir => {
-            const vert  = dir.includes('n') ? { top: -5 }    : dir.includes('s') ? { bottom: -5 }    : { top: '50%', transform: 'translateY(-50%)' };
-            const horiz = dir.includes('w') ? { left: -5 }   : dir.includes('e') ? { right: -5 }     : { left: '50%', transform: dir.includes('n') || dir.includes('s') ? 'translateX(-50%)' : 'translateY(-50%)' };
-            const cursor = `cursor-${dir}-resize`;
+            const vert  = dir.includes('n') ? { top: ho }  : dir.includes('s') ? { bottom: ho }  : { top: '50%', transform: 'translateY(-50%)' };
+            const horiz = dir.includes('w') ? { left: ho } : dir.includes('e') ? { right: ho }   : { left: '50%', transform: dir.includes('n') || dir.includes('s') ? 'translateX(-50%)' : 'translateY(-50%)' };
             return (
               <div
                 key={dir}
-                style={{ position: 'absolute', width: 10, height: 10, ...vert, ...horiz }}
-                className={`rounded-sm bg-blue-500 shadow ${cursor}`}
+                style={{ position: 'absolute', width: hs, height: hs, borderRadius: 2 / zoom, ...vert, ...horiz }}
+                className={`bg-blue-500 shadow cursor-${dir}-resize`}
                 onMouseDown={e => onResizeMouseDown(e, a.id, dir)}
               />
             );
