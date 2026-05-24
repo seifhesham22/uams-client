@@ -244,7 +244,21 @@ export default function CanvasPage() {
     };
 
     const onUp = () => {
-      if (interactionRef.current) { interactionRef.current = null; markUnsaved(); }
+      if (interactionRef.current) {
+        interactionRef.current = null;
+        setAssets(prev => {
+          const rooms = prev.filter(r => r.category === 'Infrastructure');
+          return prev.map(a => {
+            if (a.category === 'Infrastructure') return a;
+            const cx = a.x + a.w / 2;
+            const cy = a.y + a.h / 2;
+            const roomUnder = rooms.find(r => rectContains(r, cx, cy));
+            const newRoomId = roomUnder?.id ?? null;
+            return newRoomId === a.canvasRoomId ? a : { ...a, canvasRoomId: newRoomId };
+          });
+        });
+        markUnsaved();
+      }
       panRef.current = null;
     };
 
@@ -765,8 +779,8 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, o
     : 5;
 
   // Handle sizes in canvas coords so they appear constant on screen regardless of zoom.
-  const hs  = 10 / zoom;   // resize handle size
-  const ho  = -5 / zoom;   // resize handle edge offset
+  const hs  = 14 / zoom;   // resize handle size
+  const ho  = -7 / zoom;   // resize handle edge offset
   const rh  = 24 / zoom;   // rotation handle diameter
   const rOff = -(rh + 6 / zoom); // rotation handle top offset
 
@@ -782,19 +796,18 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, o
         userSelect: 'none',
         zIndex,
       }}
-      className={`rounded border-2 transition-shadow ${
+      className={`rounded border-2 overflow-hidden transition-shadow ${
         isSelected ? 'border-blue-500 shadow-lg shadow-blue-200' : (conditionBorder[a.condition] ?? 'border-transparent')
       }`}
       onMouseDown={e => onMouseDown(e, a.id)}
       onDoubleClick={e => onDoubleClick(e, a.id)}
     >
-      {/* SVG fills the asset bounds directly — no letterboxing */}
       <img
         key={a.svgUrl}
         src={toDirectUrl(a.svgUrl)}
         alt={a.assetName}
         draggable={false}
-        className="w-full h-full object-fill pointer-events-none"
+        className="block w-full h-full object-fill pointer-events-none"
         onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
       />
 
