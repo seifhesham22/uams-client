@@ -54,7 +54,7 @@ const CATEGORIES: { value: AssetCategory; label: string }[] = [
   { value: 'Infrastructure', label: 'Infrastructure' },
 ];
 
-const LOCATIONS: PlacementLocation[] = ['OnWall', 'OnCeiling', 'OnFloor', 'OnSurface'];
+const LOCATIONS: PlacementLocation[] = ['OnWall', 'OnCeiling', 'OnFloor', 'OnSurface', 'InWall', 'UnderSurface'];
 
 const assetSchema = z.object({
   name:      z.string().min(2, 'Name required'),

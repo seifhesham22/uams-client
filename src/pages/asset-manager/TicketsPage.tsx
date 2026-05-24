@@ -18,7 +18,9 @@ import type { AMTicket } from '../../types';
 
 type Tab = 'action' | 'all';
 
-const deptSchema = z.object({ departmentId: z.string().min(1, 'Select a department'), note: z.string().optional() });
+// departmentId is conditionally required — validation enforced at mutation time, not schema level,
+// because confirm/close/escalate never mount that field so zodResolver always sees it as empty.
+const deptSchema = z.object({ departmentId: z.string().optional(), note: z.string().optional() });
 type DeptForm = z.infer<typeof deptSchema>;
 
 const STATUS_COLOR: Record<string, string> = {
@@ -73,12 +75,18 @@ export default function AMTicketsPage() {
       if (!actionModal) return;
       const { ticket, type } = actionModal;
       switch (type) {
-        case 'inspection':   return sendForInspection(ticket.id, form.departmentId, form.note);
-        case 'fix':          return sendForFix(ticket.id, form.departmentId, form.note);
-        case 'replacement':  return sendForReplacement(ticket.id, form.departmentId, form.note);
-        case 'escalate':     return escalateTicket(ticket.id, form.note);
-        case 'confirm':      return confirmFix(ticket.id);
-        case 'close':        return closeTicket(ticket.id, form.note);
+        case 'inspection':
+        case 'fix':
+        case 'replacement': {
+          if (!form.departmentId)
+            return Promise.reject({ response: { data: { message: 'Please select a department' } } });
+          if (type === 'inspection') return sendForInspection(ticket.id, form.departmentId, form.note);
+          if (type === 'fix')        return sendForFix(ticket.id, form.departmentId, form.note);
+          return sendForReplacement(ticket.id, form.departmentId, form.note);
+        }
+        case 'escalate': return escalateTicket(ticket.id, form.note);
+        case 'confirm':  return confirmFix(ticket.id);
+        case 'close':    return closeTicket(ticket.id, form.note);
       }
     },
     onSuccess: () => {
@@ -197,6 +205,13 @@ export default function AMTicketsPage() {
                   <div className="px-4 pb-3 border-t border-gray-50 pt-3 space-y-2">
                     {t.notes.map(n => (
                       <div key={n.id} className="text-xs">
+                        <span className={`font-semibold mr-1 ${
+                          n.authorRole === 'Reporter'            ? 'text-blue-600'   :
+                          n.authorRole === 'Maintainer'          ? 'text-orange-600' :
+                          n.authorRole === 'Asset Manager'       ? 'text-green-700'  :
+                          n.authorRole === 'Department Manager'  ? 'text-violet-700' :
+                          'text-gray-700'
+                        }`}>{n.authorRole}:</span>
                         <span className="font-medium text-gray-700">{n.authorName}</span>
                         <span className="text-gray-400 mx-1">·</span>
                         <span className="text-gray-400">{new Date(n.createdAtUtc).toLocaleString()}</span>

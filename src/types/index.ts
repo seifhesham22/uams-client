@@ -106,7 +106,7 @@ export interface AssetDefinitionDetail {
 }
 
 export type AssetCategory = 'Electrical' | 'Plumbing' | 'Furniture' | 'Infrastructure';
-export type PlacementLocation = 'OnWall' | 'OnCeiling' | 'OnFloor' | 'OnSurface';
+export type PlacementLocation = 'OnWall' | 'OnCeiling' | 'OnFloor' | 'OnSurface' | 'InWall' | 'UnderSurface';
 
 // ── Canvas / Room design ──────────────────────────────────────────────────────
 export interface CanvasAsset {
@@ -115,6 +115,7 @@ export interface CanvasAsset {
   assetName: string;
   svgUrl: string;
   allowedLocations: string[];
+  category: string;
   x: number;
   y: number;
   w: number;
@@ -123,6 +124,7 @@ export interface CanvasAsset {
   groupId: string | null;
   groupLabel: string | null;
   condition: string;
+  canvasRoomId: string | null;
 }
 
 export interface RoomDetail {
@@ -137,6 +139,7 @@ export interface RoomDetail {
       id: string; assetDefinitionId: string; assetName: string;
       x: number; y: number; width: number; height: number; rotation: number;
       condition: string; groupId: string | null; groupLabel: string | null;
+      canvasRoomId: string | null;
     }[];
   };
 }
@@ -152,6 +155,7 @@ export interface TicketNote {
   id: string;
   authorId: string;
   authorName: string;
+  authorRole: string;
   content: string;
   createdAtUtc: string;
 }

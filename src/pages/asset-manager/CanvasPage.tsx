@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, Save, ChevronDown, ChevronRight,
-  AlertTriangle, CheckSquare, RotateCw, X as XIcon, Users2
+  AlertTriangle, CheckSquare, RotateCw, X as XIcon, Users2, Copy,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuthStore } from '../../store/authStore';
 import { getRoom, getPlacementRules, saveLayout, reportTicket, getChecklist, updateChecklistEntry } from '../../api/canvas';
-import type { CanvasAsset, PanelCategory } from '../../types';
+import type { CanvasAsset, PanelCategory, RoomDetail } from '../../types';
 import { Button } from '../../components/ui/Button';
 import { toDirectUrl } from './canvasHelpers';
 
@@ -37,9 +37,12 @@ export default function CanvasPage() {
   const user        = useAuthStore(s => s.user);
   const facultyId   = user?.facultyId ?? '';
 
+  const qc = useQueryClient();
+
   const canvasRef     = useRef<HTMLDivElement>(null);
   const canvasAreaRef = useRef<HTMLDivElement>(null);
   const interactionRef = useRef<InteractionState | null>(null);
+  const panRef = useRef<{ startX: number; startY: number; startScrollLeft: number; startScrollTop: number } | null>(null);
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef(1);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
@@ -65,49 +68,81 @@ export default function CanvasPage() {
     queryFn:  getPlacementRules,
   });
 
+  // Track which room object triggered the last full reset so we can tell
+  // whether a re-run is caused by `room` changing or only `rules` changing.
+  const prevRoomRef = useRef<typeof room | null>(null);
+
   useEffect(() => {
     if (!room) return;
-    setAssets(room.layout.placedAssets.map(p => ({
-      id:                p.id,
-      assetDefinitionId: p.assetDefinitionId,
-      assetName:         p.assetName,
-      svgUrl:            '',
-      allowedLocations:  [],
-      x: p.x, y: p.y, w: p.width, h: p.height,
-      rotation: p.rotation,
-      groupId:   p.groupId,
-      groupLabel: p.groupLabel,
-      condition: p.condition,
-    })));
-  }, [room]);
 
-  // Enrich assets with svgUrl + allowedLocations from placement rules
-  useEffect(() => {
-    if (!rules) return;
-    const defMap = new Map<string, { svgUrl: string; allowedLocations: string[] }>();
-    rules.assetsByCategory.forEach(cat =>
+    const defMap = new Map<string, { svgUrl: string; allowedLocations: string[]; category: string }>();
+    rules?.assetsByCategory.forEach(cat =>
       cat.assetDefinitions.forEach(def =>
-        defMap.set(def.id, { svgUrl: def.svgUrl, allowedLocations: def.allowedLocations })
+        defMap.set(def.id, { svgUrl: def.svgUrl, allowedLocations: def.allowedLocations, category: cat.category })
       )
     );
-    setAssets(prev => prev.map(a => {
-      const def = defMap.get(a.assetDefinitionId);
-      return def ? { ...a, svgUrl: def.svgUrl, allowedLocations: def.allowedLocations } : a;
-    }));
-  }, [rules]);
+
+    if (prevRoomRef.current !== room) {
+      // Room data changed (initial load or navigate-back refetch) — full reset from server.
+      prevRoomRef.current = room;
+      setAssets(room.layout.placedAssets.map(p => {
+        const def = defMap.get(p.assetDefinitionId);
+        return {
+          id:                p.id,
+          assetDefinitionId: p.assetDefinitionId,
+          assetName:         p.assetName,
+          svgUrl:            def?.svgUrl ?? '',
+          allowedLocations:  def?.allowedLocations ?? [],
+          category:          def?.category ?? '',
+          x: p.x, y: p.y, w: p.width, h: p.height,
+          rotation:   p.rotation,
+          groupId:    p.groupId,
+          groupLabel: p.groupLabel,
+          condition:  p.condition,
+          canvasRoomId: p.canvasRoomId,
+        };
+      }));
+    } else {
+      // Only rules changed (background refetch) — enrich svgUrls without touching positions.
+      setAssets(prev => prev.map(a => {
+        const def = defMap.get(a.assetDefinitionId);
+        return def ? { ...a, svgUrl: def.svgUrl, allowedLocations: def.allowedLocations, category: def.category } : a;
+      }));
+    }
+  }, [room, rules]);
 
   // ── save ───────────────────────────────────────────────────────────────────
   const doSave = useCallback(async (list?: CanvasAsset[]) => {
     if (!roomId) return;
     setSaveStatus('saving');
+    const toSave = list ?? assets;
     try {
-      await saveLayout(roomId, list ?? assets);
+      await saveLayout(roomId, toSave);
       setSaveStatus('saved');
+      // Sync the RQ cache so navigating away and back shows the just-saved layout immediately.
+      qc.setQueryData<RoomDetail>(['room', roomId], old =>
+        !old ? old : {
+          ...old,
+          layout: {
+            placedAssets: toSave.map(a => ({
+              id: a.id,
+              assetDefinitionId: a.assetDefinitionId,
+              assetName: a.assetName,
+              x: a.x, y: a.y, width: a.w, height: a.h,
+              rotation: a.rotation,
+              groupId: a.groupId,
+              groupLabel: a.groupLabel,
+              condition: a.condition,
+              canvasRoomId: a.canvasRoomId,
+            })),
+          },
+        }
+      );
     } catch {
       setSaveStatus('unsaved');
       toast.error('Auto-save failed');
     }
-  }, [roomId, assets]);
+  }, [roomId, assets, qc]);
 
   // auto-save
   useEffect(() => {
@@ -119,14 +154,21 @@ export default function CanvasPage() {
 
   const markUnsaved = () => setSaveStatus('unsaved');
 
-  // ── wheel zoom (Ctrl+scroll) ──────────────────────────────────────────────
+  // Block browser Ctrl+zoom globally (bubble phase — fires after canvas handler).
+  useEffect(() => {
+    const block = (e: WheelEvent) => { if (e.ctrlKey) e.preventDefault(); };
+    document.addEventListener('wheel', block, { passive: false });
+    return () => document.removeEventListener('wheel', block);
+  }, []);
+
+  // Ctrl+scroll inside the canvas area = zoom; plain scroll = pan (container scrolls).
   useEffect(() => {
     const el = canvasAreaRef.current;
     if (!el) return;
     const handler = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
       e.preventDefault();
-      setZoom(z => parseFloat(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z - e.deltaY * 0.001)).toFixed(2)));
+      setZoom(z => parseFloat(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z - e.deltaY * 0.002)).toFixed(2)));
     };
     el.addEventListener('wheel', handler, { passive: false });
     return () => el.removeEventListener('wheel', handler);
@@ -135,6 +177,16 @@ export default function CanvasPage() {
   // ── mouse interaction ─────────────────────────────────────────────────────
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
+      // Right-click pan
+      if (panRef.current) {
+        const p = panRef.current;
+        const el = canvasAreaRef.current;
+        if (el) {
+          el.scrollLeft = p.startScrollLeft - (e.clientX - p.startX);
+          el.scrollTop  = p.startScrollTop  - (e.clientY - p.startY);
+        }
+      }
+
       const ia = interactionRef.current;
       if (!ia) return;
       const dx = (e.clientX - ia.startX) / zoomRef.current;
@@ -149,9 +201,12 @@ export default function CanvasPage() {
       } else if (ia.type === 'resize') {
         setAssets(prev => prev.map(a => {
           if (a.id !== ia.id) return a;
-          const nw = Math.max(40, ia.ow + dx);
-          const nh = Math.max(20, ia.oh + dy);
-          return { ...a, w: nw, h: nh };
+          let nx = ia.ox, ny = ia.oy, nw = ia.ow, nh = ia.oh;
+          if (ia.dir.includes('e')) nw = Math.max(40, ia.ow + dx);
+          if (ia.dir.includes('w')) { nw = Math.max(40, ia.ow - dx); nx = ia.ox + (ia.ow - nw); }
+          if (ia.dir.includes('s')) nh = Math.max(20, ia.oh + dy);
+          if (ia.dir.includes('n')) { nh = Math.max(20, ia.oh - dy); ny = ia.oy + (ia.oh - nh); }
+          return { ...a, x: nx, y: ny, w: nw, h: nh };
         }));
       } else if (ia.type === 'rotate') {
         const rect = canvasRef.current?.getBoundingClientRect();
@@ -201,6 +256,7 @@ export default function CanvasPage() {
 
     const onUp = () => {
       if (interactionRef.current) { interactionRef.current = null; markUnsaved(); }
+      panRef.current = null;
     };
 
     document.addEventListener('mousemove', onMove);
@@ -217,25 +273,46 @@ export default function CanvasPage() {
     setDragOver(false);
     const raw = e.dataTransfer.getData('panel-asset');
     if (!raw) return;
-    const def: { id: string; name: string; svgUrl: string; allowedLocations: string[] } = JSON.parse(raw);
+    const def: { id: string; name: string; svgUrl: string; allowedLocations: string[]; category: string } = JSON.parse(raw);
 
     const rect = canvasRef.current!.getBoundingClientRect();
     const x = Math.max(0, Math.min(CANVAS_W - DEFAULT_W, (e.clientX - rect.left) / zoomRef.current - DEFAULT_W / 2));
     const y = Math.max(0, Math.min(CANVAS_H - DEFAULT_H, (e.clientY - rect.top)  / zoomRef.current - DEFAULT_H / 2));
 
+    const dropCx = x + DEFAULT_W / 2;
+    const dropCy = y + DEFAULT_H / 2;
+
     // Placement rule: OnSurface must land on another asset
     if (def.allowedLocations.includes('OnSurface') &&
         !def.allowedLocations.some(l => l !== 'OnSurface') &&
-        !assets.some(a => rectContains(a, x + DEFAULT_W / 2, y + DEFAULT_H / 2))) {
+        !assets.some(a => rectContains(a, dropCx, dropCy))) {
       toast.error(`"${def.name}" can only be placed on top of another asset (OnSurface rule)`);
       return;
     }
 
+    // Find the Infrastructure asset (room/wall) under the drop point.
+    // Used for: InWall validation + auto-assigning canvasRoomId for every non-infra asset.
+    const roomUnder = def.category !== 'Infrastructure'
+      ? assets.find(a => a.category === 'Infrastructure' && rectContains(a, dropCx, dropCy))
+      : undefined;
+
+    // Placement rule: InWall must be inside a room/wall structure
+    const isInWallOnly = def.allowedLocations.includes('InWall') &&
+      !def.allowedLocations.some((l: string) => l !== 'InWall');
+    if (isInWallOnly && !roomUnder) {
+      toast.error(`"${def.name}" must be placed inside a room or wall structure (InWall rule)`);
+      return;
+    }
+
+    const existingCount = assets.filter(a => a.assetDefinitionId === def.id).length;
     const next: CanvasAsset = {
-      id: newId(), assetDefinitionId: def.id, assetName: def.name,
+      id: newId(), assetDefinitionId: def.id,
+      assetName: `${def.name} #${existingCount + 1}`,
       svgUrl: def.svgUrl, allowedLocations: def.allowedLocations,
+      category: def.category ?? '',
       x, y, w: DEFAULT_W, h: DEFAULT_H, rotation: 0,
       groupId: null, groupLabel: null, condition: 'Good',
+      canvasRoomId: roomUnder?.id ?? null,
     };
     setAssets(prev => [...prev, next]);
     markUnsaved();
@@ -255,14 +332,24 @@ export default function CanvasPage() {
     } else {
       if (!selected.has(id)) setSelected(new Set([id]));
       const a = assets.find(x => x.id === id)!;
-      const groupIds = a.groupId
+      const baseIds = a.groupId
         ? assets.filter(x => x.groupId === a.groupId).map(x => x.id)
         : [id];
+      // If any dragged asset is Infrastructure, pull all assets that live inside it.
+      const infraIdSet = new Set(
+        baseIds.filter(bid => assets.find(x => x.id === bid)?.category === 'Infrastructure')
+      );
+      const childIds = infraIdSet.size > 0
+        ? assets
+            .filter(x => x.canvasRoomId !== null && infraIdSet.has(x.canvasRoomId) && !baseIds.includes(x.id))
+            .map(x => x.id)
+        : [];
+      const dragIds = [...baseIds, ...childIds];
       interactionRef.current = {
         type: 'drag',
-        ids: groupIds,
+        ids: dragIds,
         startX: e.clientX, startY: e.clientY,
-        origins: assets.filter(x => groupIds.includes(x.id)).map(x => ({ id: x.id, x: x.x, y: x.y })),
+        origins: assets.filter(x => dragIds.includes(x.id)).map(x => ({ id: x.id, x: x.x, y: x.y })),
       };
     }
     setContextMenu(null);
@@ -274,10 +361,10 @@ export default function CanvasPage() {
     setContextMenu({ assetId: id, x: (e.clientX - rect.left) / zoomRef.current, y: (e.clientY - rect.top) / zoomRef.current });
   };
 
-  const handleResizeMouseDown = (e: React.MouseEvent, id: string) => {
+  const handleResizeMouseDown = (e: React.MouseEvent, id: string, dir: ResizeDir) => {
     e.stopPropagation();
     const a = assets.find(x => x.id === id)!;
-    interactionRef.current = { type: 'resize', id, startX: e.clientX, startY: e.clientY, ow: a.w, oh: a.h };
+    interactionRef.current = { type: 'resize', id, startX: e.clientX, startY: e.clientY, ow: a.w, oh: a.h, ox: a.x, oy: a.y, dir };
   };
 
   const handleRotateMouseDown = (e: React.MouseEvent, id: string) => {
@@ -356,6 +443,32 @@ export default function CanvasPage() {
     markUnsaved();
   };
 
+  // ── name edit ─────────────────────────────────────────────────────────────
+  const handleNameChange = (id: string, name: string) => {
+    setAssets(prev => prev.map(a => a.id === id ? { ...a, assetName: name } : a));
+    markUnsaved();
+  };
+
+  // ── duplicate ─────────────────────────────────────────────────────────────
+  const duplicateAsset = (assetId: string) => {
+    const src = assets.find(a => a.id === assetId);
+    if (!src) return;
+    const baseName = src.assetName.replace(/ #\d+$/, '');
+    const sameDefCount = assets.filter(a => a.assetDefinitionId === src.assetDefinitionId).length;
+    const next: CanvasAsset = {
+      ...src,
+      id: newId(),
+      assetName: `${baseName} #${sameDefCount + 1}`,
+      x: Math.min(CANVAS_W - src.w, src.x + 20),
+      y: Math.min(CANVAS_H - src.h, src.y + 20),
+      condition: 'Good',
+      groupId: null,
+      groupLabel: null,
+    };
+    setAssets(prev => [...prev, next]);
+    markUnsaved();
+  };
+
   // ── report / checklist ────────────────────────────────────────────────────
   const submitReport = useMutation({
     mutationFn: async () => {
@@ -364,10 +477,11 @@ export default function CanvasPage() {
     },
     onSuccess: () => {
       toast.success('Ticket reported');
-      // reflect the new condition immediately without a page refresh
       setAssets(prev => prev.map(a =>
         a.id === reportModal!.assetId ? { ...a, condition: 'Reported' } : a
       ));
+      qc.invalidateQueries({ queryKey: ['am-tickets'] });
+      qc.invalidateQueries({ queryKey: ['am-action-count'] });
       setReportModal(null);
       setReportDesc('');
       setContextMenu(null);
@@ -426,7 +540,17 @@ export default function CanvasPage() {
       </div>
 
       {/* ── Canvas area ───────────────────────────────────────────────────── */}
-      <div ref={canvasAreaRef} className="flex-1 overflow-auto pt-12">
+      <div
+        ref={canvasAreaRef}
+        className="flex-1 overflow-auto pt-12"
+        onContextMenu={e => e.preventDefault()}
+        onMouseDown={e => {
+          if (e.button === 2) {
+            const el = canvasAreaRef.current!;
+            panRef.current = { startX: e.clientX, startY: e.clientY, startScrollLeft: el.scrollLeft, startScrollTop: el.scrollTop };
+          }
+        }}
+      >
         <div className="flex items-center justify-center p-8" style={{ minHeight: '100%' }}>
           {/* Space-reservation div so the scroll area grows with zoom */}
           <div style={{ width: CANVAS_W * zoom, height: CANVAS_H * zoom, position: 'relative', flexShrink: 0 }}>
@@ -460,6 +584,7 @@ export default function CanvasPage() {
                 onDoubleClick={handleAssetDoubleClick}
                 onResizeMouseDown={handleResizeMouseDown}
                 onRotateMouseDown={handleRotateMouseDown}
+                onNameChange={handleNameChange}
               />
             ))}
 
@@ -492,7 +617,8 @@ export default function CanvasPage() {
                   {(() => {
                     const ctxAsset = assets.find(a => a.id === contextMenu.assetId);
                     const hasActiveTicket = ctxAsset && ACTIVE_TICKET_CONDITIONS.has(ctxAsset.condition);
-                    return (
+                    const isInfrastructure = ctxAsset?.category === 'Infrastructure';
+                    return !isInfrastructure ? (
                       <button
                         disabled={!!hasActiveTicket}
                         className={`flex items-center gap-2.5 w-full px-4 py-3 text-sm transition-colors ${
@@ -505,8 +631,14 @@ export default function CanvasPage() {
                         <AlertTriangle size={15} className={hasActiveTicket ? 'text-gray-300' : 'text-red-500'} />
                         {hasActiveTicket ? 'Already Reported' : 'Report Issue'}
                       </button>
-                    );
+                    ) : null;
                   })()}
+                  <button
+                    className="flex items-center gap-2.5 w-full px-4 py-3 text-sm hover:bg-green-50 hover:text-green-600 transition-colors border-t border-gray-50"
+                    onClick={() => { duplicateAsset(contextMenu.assetId); setContextMenu(null); }}
+                  >
+                    <Copy size={15} className="text-green-500" /> Duplicate
+                  </button>
                   <button
                     className="flex items-center gap-2.5 w-full px-4 py-3 text-sm hover:bg-blue-50 hover:text-blue-600 transition-colors border-t border-gray-50"
                     onClick={async () => { if (saveStatus === 'unsaved') await doSave(); setChecklistModal({ assetId: contextMenu.assetId }); setContextMenu(null); }}
@@ -548,11 +680,19 @@ export default function CanvasPage() {
               rows={4}
               className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
             />
+            {reportDesc.trim() === '' && submitReport.isError === false && (
+              <p className="text-xs text-gray-400 mt-1">A description is required.</p>
+            )}
             <div className="flex gap-3 mt-4">
               <Button variant="secondary" className="flex-1" onClick={() => { setReportModal(null); setReportDesc(''); }}>
                 Cancel
               </Button>
-              <Button className="flex-1" loading={submitReport.isPending} onClick={() => submitReport.mutate()}>
+              <Button
+                className="flex-1"
+                loading={submitReport.isPending}
+                disabled={reportDesc.trim() === ''}
+                onClick={() => submitReport.mutate()}
+              >
                 <AlertTriangle size={14} /> Submit Report
               </Button>
             </div>
@@ -609,15 +749,24 @@ interface PlacedAssetElProps {
   showHandles: boolean;
   onMouseDown: (e: React.MouseEvent, id: string) => void;
   onDoubleClick: (e: React.MouseEvent, id: string) => void;
-  onResizeMouseDown: (e: React.MouseEvent, id: string) => void;
+  onResizeMouseDown: (e: React.MouseEvent, id: string, dir: ResizeDir) => void;
   onRotateMouseDown: (e: React.MouseEvent, id: string) => void;
+  onNameChange: (id: string, name: string) => void;
 }
 
-function PlacedAssetEl({ asset: a, isSelected, showHandles, onMouseDown, onDoubleClick, onResizeMouseDown, onRotateMouseDown }: PlacedAssetElProps) {
+function PlacedAssetEl({ asset: a, isSelected, showHandles, onMouseDown, onDoubleClick, onResizeMouseDown, onRotateMouseDown, onNameChange }: PlacedAssetElProps) {
   const conditionBorder: Record<string, string> = {
-    Good:     'border-transparent',
-    Reported: 'border-red-400',
+    Good:             'border-transparent',
+    Reported:         'border-amber-400',
+    UnderMaintenance: 'border-blue-400',
+    Irreparable:      'border-red-500',
+    Replaced:         'border-teal-400',
   };
+
+  const zIndex = a.category === 'Infrastructure'                                    ? 1
+    : a.allowedLocations.includes('UnderSurface')                                   ? 3
+    : a.allowedLocations.length > 0 && a.allowedLocations.every(l => l === 'OnSurface') ? 10
+    : 5;
 
   return (
     <div
@@ -629,7 +778,7 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, onMouseDown, onDoubl
         transformOrigin: 'center center',
         cursor: 'move',
         userSelect: 'none',
-        zIndex: isSelected ? 20 : 10,
+        zIndex,
       }}
       className={`rounded border-2 transition-shadow ${
         isSelected ? 'border-blue-500 shadow-lg shadow-blue-200' : (conditionBorder[a.condition] ?? 'border-transparent')
@@ -637,8 +786,9 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, onMouseDown, onDoubl
       onMouseDown={e => onMouseDown(e, a.id)}
       onDoubleClick={e => onDoubleClick(e, a.id)}
     >
-      {/* SVG image */}
+      {/* SVG image — key forces remount if URL changes after initial render */}
       <img
+        key={a.svgUrl}
         src={toDirectUrl(a.svgUrl)}
         alt={a.assetName}
         draggable={false}
@@ -646,22 +796,25 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, onMouseDown, onDoubl
         onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
       />
 
-      {/* Label */}
-      <div className="absolute -bottom-5 left-0 right-0 text-center pointer-events-none">
-        <span className="text-xs text-gray-500 bg-white/80 px-1 rounded">{a.assetName}</span>
-      </div>
+      {/* Name — hidden until selected; editable inline */}
+      {isSelected && showHandles && (
+        <div
+          className="absolute -bottom-7 left-0 right-0 text-center"
+          onMouseDown={e => e.stopPropagation()}
+          onClick={e => e.stopPropagation()}
+        >
+          <input
+            className="text-xs bg-white border border-blue-300 rounded px-1 text-center w-full focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-700"
+            value={a.assetName}
+            onChange={e => onNameChange(a.id, e.target.value)}
+          />
+        </div>
+      )}
 
       {/* Group badge */}
       {a.groupLabel && (
         <div className="absolute -top-5 left-0 pointer-events-none">
           <span className="text-xs bg-violet-100 text-violet-700 px-1 rounded">{a.groupLabel}</span>
-        </div>
-      )}
-
-      {/* Reported badge */}
-      {a.condition === 'Reported' && (
-        <div className="absolute top-0 right-0 w-4 h-4 bg-red-500 rounded-full flex items-center justify-center pointer-events-none">
-          <span className="text-white text-xs leading-none font-bold">!</span>
         </div>
       )}
 
@@ -675,12 +828,20 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, onMouseDown, onDoubl
           >
             <RotateCw size={12} className="text-white" />
           </div>
-          {/* Resize handle (bottom-right) */}
-          <div
-            style={{ position: 'absolute', bottom: -5, right: -5 }}
-            className="w-4 h-4 rounded-sm bg-blue-500 cursor-se-resize shadow"
-            onMouseDown={e => onResizeMouseDown(e, a.id)}
-          />
+          {/* Resize handles — 8 directions */}
+          {(['nw','n','ne','e','se','s','sw','w'] as ResizeDir[]).map(dir => {
+            const vert  = dir.includes('n') ? { top: -5 }    : dir.includes('s') ? { bottom: -5 }    : { top: '50%', transform: 'translateY(-50%)' };
+            const horiz = dir.includes('w') ? { left: -5 }   : dir.includes('e') ? { right: -5 }     : { left: '50%', transform: dir.includes('n') || dir.includes('s') ? 'translateX(-50%)' : 'translateY(-50%)' };
+            const cursor = `cursor-${dir}-resize`;
+            return (
+              <div
+                key={dir}
+                style={{ position: 'absolute', width: 10, height: 10, ...vert, ...horiz }}
+                className={`rounded-sm bg-blue-500 shadow ${cursor}`}
+                onMouseDown={e => onResizeMouseDown(e, a.id, dir)}
+              />
+            );
+          })}
         </>
       )}
     </div>
@@ -717,7 +878,7 @@ function CategoryAccordion({ category }: { category: PanelCategory }) {
           >
             <div className="px-3 pb-2 space-y-1">
               {category.assetDefinitions.map(def => (
-                <PanelAsset key={def.id} def={def} />
+                <PanelAsset key={def.id} def={def} category={category.category} />
               ))}
             </div>
           </motion.div>
@@ -727,12 +888,12 @@ function CategoryAccordion({ category }: { category: PanelCategory }) {
   );
 }
 
-function PanelAsset({ def }: { def: { id: string; name: string; svgUrl: string; allowedLocations: string[] } }) {
+function PanelAsset({ def, category }: { def: { id: string; name: string; svgUrl: string; allowedLocations: string[] }; category: string }) {
   return (
     <div
       draggable
       onDragStart={e =>
-        e.dataTransfer.setData('panel-asset', JSON.stringify(def))
+        e.dataTransfer.setData('panel-asset', JSON.stringify({ ...def, category }))
       }
       className="flex items-center gap-2 p-2 rounded-lg border border-gray-100 hover:border-blue-300 hover:bg-blue-50 cursor-grab active:cursor-grabbing transition-all select-none"
     >
@@ -851,9 +1012,10 @@ function Modal({ title, children, onClose, wide }: {
 }
 
 // ── Interaction state types ───────────────────────────────────────────────────
+type ResizeDir = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw';
 type InteractionState =
   | { type: 'drag';         ids: string[]; startX: number; startY: number; origins: { id: string; x: number; y: number }[] }
-  | { type: 'resize';       id: string;   startX: number; startY: number; ow: number; oh: number }
+  | { type: 'resize';       id: string;   startX: number; startY: number; ow: number; oh: number; ox: number; oy: number; dir: ResizeDir }
   | { type: 'rotate';       id: string;   startX: number; startY: number }
   | { type: 'group-resize'; startX: number; startY: number; origins: { id: string; x: number; y: number; w: number; h: number }[]; bbox: { minX: number; minY: number; w: number; h: number } }
   | { type: 'group-rotate'; startX: number; startY: number; origins: { id: string; x: number; y: number; w: number; h: number; rotation: number }[]; cx: number; cy: number; initialAngle: number };

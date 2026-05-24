@@ -3,7 +3,7 @@ import type { PagedResult, AssetDefinitionListItem, AssetDefinitionDetail, Asset
 
 // ── Enum integer maps (must match C# enum order exactly) ─────────────────────
 // C# AssetCategory: Electrinical=0, Plumbing=1, Furnuture=2, Infrastructure=3
-// C# PlacementLocation: OnWall=0, OnCeiling=1, OnFloor=2, OnSurface=3
+// C# PlacementLocation: OnWall=0, OnCeiling=1, OnFloor=2, OnSurface=3, InWall=4, UnderSurface=5
 
 const CATEGORY_INT: Record<AssetCategory, number> = {
   Electrical: 0,
@@ -17,6 +17,8 @@ const LOCATION_INT: Record<PlacementLocation, number> = {
   OnCeiling: 1,
   OnFloor: 2,
   OnSurface: 3,
+  InWall: 4,
+  UnderSurface: 5,
 };
 
 // ── Backend → display name normalisation ─────────────────────────────────────

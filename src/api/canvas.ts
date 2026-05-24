@@ -37,6 +37,7 @@ export const saveLayout = (roomId: string, assets: CanvasAsset[]) =>
     Rotation:          a.rotation,
     GroupId:           a.groupId,
     GroupLabel:        a.groupLabel,
+    CanvasRoomId:      a.canvasRoomId,
   })));
 
 export const reportTicket = (

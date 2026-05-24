@@ -167,6 +167,13 @@ export default function TicketsPage() {
                 <div className="px-4 pb-3 border-t border-gray-50 pt-3 space-y-2">
                   {t.notes.map(n => (
                     <div key={n.id} className="text-xs">
+                      <span className={`font-semibold mr-1 ${
+                        n.authorRole === 'Reporter'            ? 'text-blue-600'   :
+                        n.authorRole === 'Maintainer'          ? 'text-orange-600' :
+                        n.authorRole === 'Asset Manager'       ? 'text-green-700'  :
+                        n.authorRole === 'Department Manager'  ? 'text-violet-700' :
+                        'text-gray-700'
+                      }`}>{n.authorRole}:</span>
                       <span className="font-medium text-gray-700">{n.authorName}</span>
                       <span className="text-gray-400 mx-1">·</span>
                       <span className="text-gray-400">{new Date(n.createdAtUtc).toLocaleString()}</span>
