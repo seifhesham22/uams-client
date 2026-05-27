@@ -188,14 +188,25 @@ export default function CanvasPage() {
           return { ...a, x: orig.x + dx, y: orig.y + dy };
         }));
       } else if (ia.type === 'resize') {
+        // Compute new room dimensions once, reuse for both room and children.
+        let nx = ia.ox, ny = ia.oy, nw = ia.ow, nh = ia.oh;
+        if (ia.dir.includes('e')) nw = Math.max(40, ia.ow + dx);
+        if (ia.dir.includes('w')) { nw = Math.max(40, ia.ow - dx); nx = ia.ox + (ia.ow - nw); }
+        if (ia.dir.includes('s')) nh = Math.max(20, ia.oh + dy);
+        if (ia.dir.includes('n')) { nh = Math.max(20, ia.oh - dy); ny = ia.oy + (ia.oh - nh); }
+        const scaleX = nw / ia.ow;
+        const scaleY = nh / ia.oh;
         setAssets(prev => prev.map(a => {
-          if (a.id !== ia.id) return a;
-          let nx = ia.ox, ny = ia.oy, nw = ia.ow, nh = ia.oh;
-          if (ia.dir.includes('e')) nw = Math.max(40, ia.ow + dx);
-          if (ia.dir.includes('w')) { nw = Math.max(40, ia.ow - dx); nx = ia.ox + (ia.ow - nw); }
-          if (ia.dir.includes('s')) nh = Math.max(20, ia.oh + dy);
-          if (ia.dir.includes('n')) { nh = Math.max(20, ia.oh - dy); ny = ia.oy + (ia.oh - nh); }
-          return { ...a, x: nx, y: ny, w: nw, h: nh };
+          if (a.id === ia.id) return { ...a, x: nx, y: ny, w: nw, h: nh };
+          const child = ia.children.find(c => c.id === a.id);
+          if (!child) return a;
+          return {
+            ...a,
+            x: nx + (child.x - ia.ox) * scaleX,
+            y: ny + (child.y - ia.oy) * scaleY,
+            w: Math.max(20, child.w * scaleX),
+            h: Math.max(10, child.h * scaleY),
+          };
         }));
       } else if (ia.type === 'rotate') {
         const rect = canvasRef.current?.getBoundingClientRect();
@@ -367,7 +378,10 @@ export default function CanvasPage() {
   const handleResizeMouseDown = (e: React.MouseEvent, id: string, dir: ResizeDir) => {
     e.stopPropagation();
     const a = assets.find(x => x.id === id)!;
-    interactionRef.current = { type: 'resize', id, startX: e.clientX, startY: e.clientY, ow: a.w, oh: a.h, ox: a.x, oy: a.y, dir };
+    const children = a.category === 'Infrastructure'
+      ? assets.filter(c => c.canvasRoomId === id).map(c => ({ id: c.id, x: c.x, y: c.y, w: c.w, h: c.h }))
+      : [];
+    interactionRef.current = { type: 'resize', id, startX: e.clientX, startY: e.clientY, ow: a.w, oh: a.h, ox: a.x, oy: a.y, dir, children };
   };
 
   const handleRotateMouseDown = (e: React.MouseEvent, id: string) => {
@@ -446,9 +460,14 @@ export default function CanvasPage() {
     markUnsaved();
   };
 
-  // ── name edit ─────────────────────────────────────────────────────────────
+  // ── name / rotation edit ──────────────────────────────────────────────────
   const handleNameChange = (id: string, name: string) => {
     setAssets(prev => prev.map(a => a.id === id ? { ...a, assetName: name } : a));
+    markUnsaved();
+  };
+
+  const handleRotationChange = (id: string, rotation: number) => {
+    setAssets(prev => prev.map(a => a.id === id ? { ...a, rotation } : a));
     markUnsaved();
   };
 
@@ -591,6 +610,7 @@ export default function CanvasPage() {
               onResizeMouseDown={handleResizeMouseDown}
               onRotateMouseDown={handleRotateMouseDown}
               onNameChange={handleNameChange}
+              onRotationChange={handleRotationChange}
             />
           ))}
 
@@ -762,9 +782,10 @@ interface PlacedAssetElProps {
   onResizeMouseDown: (e: React.MouseEvent, id: string, dir: ResizeDir) => void;
   onRotateMouseDown: (e: React.MouseEvent, id: string) => void;
   onNameChange: (id: string, name: string) => void;
+  onRotationChange: (id: string, rotation: number) => void;
 }
 
-function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, onDoubleClick, onResizeMouseDown, onRotateMouseDown, onNameChange }: PlacedAssetElProps) {
+function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, onDoubleClick, onResizeMouseDown, onRotateMouseDown, onNameChange, onRotationChange }: PlacedAssetElProps) {
   const conditionBorder: Record<string, string> = {
     Good:             'border-transparent',
     Reported:         'border-amber-400',
@@ -773,18 +794,21 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, o
     Replaced:         'border-teal-400',
   };
 
-  const zIndex = a.category === 'Infrastructure'                                    ? 1
-    : a.allowedLocations.includes('UnderSurface')                                   ? 3
+  const zIndex = a.category === 'Infrastructure'                                        ? 1
+    : a.allowedLocations.includes('UnderSurface')                                       ? 3
     : a.allowedLocations.length > 0 && a.allowedLocations.every(l => l === 'OnSurface') ? 10
+    : a.allowedLocations.includes('OnCeiling')                                          ? 20
     : 5;
 
   // Handle sizes in canvas coords so they appear constant on screen regardless of zoom.
-  const hs  = 14 / zoom;   // resize handle size
-  const ho  = -7 / zoom;   // resize handle edge offset
-  const rh  = 24 / zoom;   // rotation handle diameter
+  const hs   = 20 / zoom;   // resize handle visible size
+  const hit  = 36 / zoom;   // invisible hit area around each handle
+  const hito = -18 / zoom;  // hit area offset (half of hit)
+  const rh   = 24 / zoom;   // rotation handle diameter
   const rOff = -(rh + 6 / zoom); // rotation handle top offset
 
   return (
+    // Outer wrapper: handles positioning + rotation. NO overflow-hidden so handles are never clipped.
     <div
       style={{
         position: 'absolute',
@@ -796,25 +820,36 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, o
         userSelect: 'none',
         zIndex,
       }}
-      className={`rounded border-2 overflow-hidden transition-shadow ${
-        isSelected ? 'border-blue-500 shadow-lg shadow-blue-200' : (conditionBorder[a.condition] ?? 'border-transparent')
-      }`}
       onMouseDown={e => onMouseDown(e, a.id)}
       onDoubleClick={e => onDoubleClick(e, a.id)}
     >
-      <img
-        key={a.svgUrl}
-        src={toDirectUrl(a.svgUrl)}
-        alt={a.assetName}
-        draggable={false}
-        className="block w-full h-full object-fill pointer-events-none"
-        onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
-      />
+      {/* Inner visual container: border + rounded corners + overflow-hidden for the image only */}
+      <div
+        className={`w-full h-full rounded border-2 overflow-hidden transition-shadow ${
+          isSelected ? 'border-blue-500 shadow-lg shadow-blue-200' : (conditionBorder[a.condition] ?? 'border-transparent')
+        }`}
+      >
+        <img
+          key={a.svgUrl}
+          src={toDirectUrl(a.svgUrl)}
+          alt={a.assetName}
+          draggable={false}
+          className="block w-full h-full object-fill pointer-events-none"
+          onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
+        />
+      </div>
 
-      {/* Name — hidden until selected; editable inline */}
+      {/* Group badge */}
+      {a.groupLabel && (
+        <div style={{ position: 'absolute', top: -20 / zoom, left: 0 }} className="pointer-events-none">
+          <span style={{ fontSize: 12 / zoom, padding: `0 ${4 / zoom}px` }} className="bg-violet-100 text-violet-700 rounded">{a.groupLabel}</span>
+        </div>
+      )}
+
+      {/* Name + rotation inputs — below the asset */}
       {isSelected && showHandles && (
         <div
-          style={{ position: 'absolute', bottom: -(28 / zoom), left: 0, right: 0, textAlign: 'center' }}
+          style={{ position: 'absolute', bottom: -(54 / zoom), left: 0, right: 0 }}
           onMouseDown={e => e.stopPropagation()}
           onClick={e => e.stopPropagation()}
         >
@@ -824,16 +859,20 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, o
             value={a.assetName}
             onChange={e => onNameChange(a.id, e.target.value)}
           />
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 / zoom, marginTop: 3 / zoom }}>
+            <input
+              type="number"
+              style={{ fontSize: 11 / zoom, height: 18 / zoom, padding: `0 ${4 / zoom}px`, borderRadius: 4 / zoom, borderWidth: 1 / zoom, width: 54 / zoom }}
+              className="bg-white border-blue-300 text-center focus:outline-none text-gray-700"
+              value={a.rotation}
+              onChange={e => onRotationChange(a.id, Number(e.target.value))}
+            />
+            <span style={{ fontSize: 11 / zoom, color: '#9ca3af' }}>°</span>
+          </div>
         </div>
       )}
 
-      {/* Group badge */}
-      {a.groupLabel && (
-        <div style={{ position: 'absolute', top: -20 / zoom, left: 0 }} className="pointer-events-none">
-          <span style={{ fontSize: 12 / zoom, padding: `0 ${4 / zoom}px` }} className="bg-violet-100 text-violet-700 rounded">{a.groupLabel}</span>
-        </div>
-      )}
-
+      {/* Handles — outside overflow-hidden so they are fully visible and clickable */}
       {isSelected && showHandles && (
         <>
           {/* Rotation handle */}
@@ -844,17 +883,19 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, o
           >
             <RotateCw size={12 / zoom} className="text-white" />
           </div>
-          {/* Resize handles — 8 directions, all zoom-invariant */}
+          {/* Resize handles — large transparent hit area wrapping a visible dot */}
           {(['nw','n','ne','e','se','s','sw','w'] as ResizeDir[]).map(dir => {
-            const vert  = dir.includes('n') ? { top: ho }  : dir.includes('s') ? { bottom: ho }  : { top: '50%', transform: 'translateY(-50%)' };
-            const horiz = dir.includes('w') ? { left: ho } : dir.includes('e') ? { right: ho }   : { left: '50%', transform: dir.includes('n') || dir.includes('s') ? 'translateX(-50%)' : 'translateY(-50%)' };
+            const vert  = dir.includes('n') ? { top: hito }  : dir.includes('s') ? { bottom: hito }  : { top: '50%', transform: 'translateY(-50%)' };
+            const horiz = dir.includes('w') ? { left: hito } : dir.includes('e') ? { right: hito }   : { left: '50%', transform: dir.includes('n') || dir.includes('s') ? 'translateX(-50%)' : 'translateY(-50%)' };
             return (
               <div
                 key={dir}
-                style={{ position: 'absolute', width: hs, height: hs, borderRadius: 2 / zoom, ...vert, ...horiz }}
-                className={`bg-blue-500 shadow cursor-${dir}-resize`}
+                style={{ position: 'absolute', width: hit, height: hit, display: 'flex', alignItems: 'center', justifyContent: 'center', ...vert, ...horiz }}
+                className={`cursor-${dir}-resize`}
                 onMouseDown={e => onResizeMouseDown(e, a.id, dir)}
-              />
+              >
+                <div style={{ width: hs, height: hs, borderRadius: 2 / zoom }} className="bg-blue-500 shadow pointer-events-none" />
+              </div>
             );
           })}
         </>
@@ -1030,7 +1071,7 @@ function Modal({ title, children, onClose, wide }: {
 type ResizeDir = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw';
 type InteractionState =
   | { type: 'drag';         ids: string[]; startX: number; startY: number; origins: { id: string; x: number; y: number }[] }
-  | { type: 'resize';       id: string;   startX: number; startY: number; ow: number; oh: number; ox: number; oy: number; dir: ResizeDir }
+  | { type: 'resize';       id: string;   startX: number; startY: number; ow: number; oh: number; ox: number; oy: number; dir: ResizeDir; children: { id: string; x: number; y: number; w: number; h: number }[] }
   | { type: 'rotate';       id: string;   startX: number; startY: number }
   | { type: 'group-resize'; startX: number; startY: number; origins: { id: string; x: number; y: number; w: number; h: number }[]; bbox: { minX: number; minY: number; w: number; h: number } }
   | { type: 'group-rotate'; startX: number; startY: number; origins: { id: string; x: number; y: number; w: number; h: number; rotation: number }[]; cx: number; cy: number; initialAngle: number };
