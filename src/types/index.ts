@@ -125,6 +125,23 @@ export interface CanvasAsset {
   groupLabel: string | null;
   condition: string;
   canvasRoomId: string | null;
+  compositeId: string | null;
+}
+
+export interface CompositeTemplateItem {
+  assetDefinitionId: string;
+  assetName: string;
+  relX: number;
+  relY: number;
+  width: number;
+  height: number;
+  rotation: number;
+}
+
+export interface CompositeTemplate {
+  id: string;
+  name: string;
+  items: CompositeTemplateItem[];
 }
 
 export interface RoomDetail {
@@ -139,7 +156,7 @@ export interface RoomDetail {
       id: string; assetDefinitionId: string; assetName: string;
       x: number; y: number; width: number; height: number; rotation: number;
       condition: string; groupId: string | null; groupLabel: string | null;
-      canvasRoomId: string | null;
+      canvasRoomId: string | null; compositeId: string | null;
     }[];
   };
 }

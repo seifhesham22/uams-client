@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 import {
   LayoutDashboard, Building2, GraduationCap, Briefcase,
-  Users, Package, LogOut, ChevronRight, Menu, X
+  Users, Package, Layers, LogOut, ChevronRight, Menu, X
 } from 'lucide-react';
 import { useState } from 'react';
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
@@ -14,6 +14,7 @@ const NAV = [
   { to: '/admin/departments',  icon: Briefcase,        label: 'Departments'                  },
   { to: '/admin/managers',     icon: Users,            label: 'Managers'                     },
   { to: '/admin/assets',       icon: Package,          label: 'Asset Definitions'            },
+  { to: '/admin/composites',   icon: Layers,           label: 'Composites'                   },
 ];
 
 export function AdminLayout() {

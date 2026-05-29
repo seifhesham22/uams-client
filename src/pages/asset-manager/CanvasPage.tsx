@@ -8,8 +8,8 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuthStore } from '../../store/authStore';
-import { getRoom, getPlacementRules, saveLayout, reportTicket, getChecklist, updateChecklistEntry } from '../../api/canvas';
-import type { CanvasAsset, PanelCategory, RoomDetail } from '../../types';
+import { getRoom, getPlacementRules, saveLayout, reportTicket, getChecklist, updateChecklistEntry, getCompositeTemplates, createCompositeTemplate, deleteCompositeTemplate } from '../../api/canvas';
+import type { CanvasAsset, PanelCategory, RoomDetail, CompositeTemplate } from '../../types';
 import { Button } from '../../components/ui/Button';
 import { toDirectUrl } from './canvasHelpers';
 
@@ -69,6 +69,14 @@ export default function CanvasPage() {
     queryFn:  getPlacementRules,
   });
 
+  const { data: compositeTemplates = [], refetch: refetchComposites } = useQuery({
+    queryKey: ['composite-templates'],
+    queryFn:  getCompositeTemplates,
+  });
+
+  const [showCreateComposite, setShowCreateComposite] = useState(false);
+  const [newCompositeName,    setNewCompositeName]    = useState('');
+
   // Track which room object triggered the last full reset so we can tell
   // whether a re-run is caused by `room` changing or only `rules` changing.
   const prevRoomRef = useRef<typeof room | null>(null);
@@ -101,6 +109,7 @@ export default function CanvasPage() {
           groupLabel: p.groupLabel,
           condition:  p.condition,
           canvasRoomId: p.canvasRoomId,
+          compositeId: p.compositeId ?? null,
         };
       }));
     } else {
@@ -135,6 +144,7 @@ export default function CanvasPage() {
               groupLabel: a.groupLabel,
               condition: a.condition,
               canvasRoomId: a.canvasRoomId,
+              compositeId: a.compositeId,
             })),
           },
         }
@@ -285,6 +295,39 @@ export default function CanvasPage() {
   const onCanvasDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragOver(false);
+
+    // ── composite template drop ──────────────────────────────────────────────
+    const rawComposite = e.dataTransfer.getData('composite-template');
+    if (rawComposite) {
+      const tpl: CompositeTemplate & { items: (CompositeTemplate['items'][0] & { svgUrl: string; allowedLocations: string[]; category: string })[] } = JSON.parse(rawComposite);
+      const rect = canvasRef.current!.getBoundingClientRect();
+      const ox = Math.max(0, (e.clientX - rect.left) / zoomRef.current);
+      const oy = Math.max(0, (e.clientY - rect.top)  / zoomRef.current);
+      const cid = newId();
+      const roomUnder = assets.find(a => a.category === 'Infrastructure' && rectContains(a, ox, oy));
+      setAssets(prev => [
+        ...prev,
+        ...tpl.items.map(item => ({
+          id: newId(),
+          assetDefinitionId: item.assetDefinitionId,
+          assetName: item.assetName,
+          svgUrl: item.svgUrl,
+          allowedLocations: item.allowedLocations,
+          category: item.category,
+          x: ox + item.relX, y: oy + item.relY,
+          w: item.width, h: item.height,
+          rotation: item.rotation,
+          groupId: null, groupLabel: null,
+          condition: 'Good' as const,
+          canvasRoomId: roomUnder?.id ?? null,
+          compositeId: cid,
+        })),
+      ]);
+      markUnsaved();
+      return;
+    }
+
+    // ── single asset drop ────────────────────────────────────────────────────
     const raw = e.dataTransfer.getData('panel-asset');
     if (!raw) return;
     const def: { id: string; name: string; svgUrl: string; allowedLocations: string[]; category: string } = JSON.parse(raw);
@@ -296,10 +339,16 @@ export default function CanvasPage() {
     const dropCx = x + DEFAULT_W / 2;
     const dropCy = y + DEFAULT_H / 2;
 
-    // Placement rule: OnSurface must land on another asset
+    // Only one room allowed on the canvas at a time.
+    if (def.category === 'Infrastructure' && assets.some(a => a.category === 'Infrastructure')) {
+      toast.error('Only one room is allowed on the canvas.');
+      return;
+    }
+
+    // Placement rule: OnSurface must land on a non-Infrastructure asset (room floor doesn't count).
     if (def.allowedLocations.includes('OnSurface') &&
         !def.allowedLocations.some(l => l !== 'OnSurface') &&
-        !assets.some(a => rectContains(a, dropCx, dropCy))) {
+        !assets.some(a => a.category !== 'Infrastructure' && rectContains(a, dropCx, dropCy))) {
       toast.error(`"${def.name}" can only be placed on top of another asset (OnSurface rule)`);
       return;
     }
@@ -327,6 +376,7 @@ export default function CanvasPage() {
       x, y, w: DEFAULT_W, h: DEFAULT_H, rotation: 0,
       groupId: null, groupLabel: null, condition: 'Good',
       canvasRoomId: roomUnder?.id ?? null,
+      compositeId: null,
     };
     setAssets(prev => [...prev, next]);
     markUnsaved();
@@ -337,18 +387,31 @@ export default function CanvasPage() {
     e.stopPropagation();
     if (e.button !== 0) return;
 
+    const a = assets.find(x => x.id === id)!;
+    const compositeMembers = a.compositeId
+      ? assets.filter(x => x.compositeId === a.compositeId).map(x => x.id)
+      : null;
+
     if (e.shiftKey) {
       setSelected(prev => {
         const s = new Set(prev);
-        s.has(id) ? s.delete(id) : s.add(id);
+        if (compositeMembers) {
+          const allIn = compositeMembers.every(mid => s.has(mid));
+          allIn ? compositeMembers.forEach(mid => s.delete(mid)) : compositeMembers.forEach(mid => s.add(mid));
+        } else {
+          s.has(id) ? s.delete(id) : s.add(id);
+        }
         return s;
       });
     } else {
-      if (!selected.has(id)) setSelected(new Set([id]));
-      const a = assets.find(x => x.id === id)!;
-      const baseIds = a.groupId
+      if (compositeMembers) {
+        setSelected(new Set(compositeMembers));
+      } else if (!selected.has(id)) {
+        setSelected(new Set([id]));
+      }
+      const baseIds = compositeMembers ?? (a.groupId
         ? assets.filter(x => x.groupId === a.groupId).map(x => x.id)
-        : [id];
+        : [id]);
       // If any dragged asset is Infrastructure, pull all assets that live inside it.
       const infraIdSet = new Set(
         baseIds.filter(bid => assets.find(x => x.id === bid)?.category === 'Infrastructure')
@@ -378,6 +441,7 @@ export default function CanvasPage() {
   const handleResizeMouseDown = (e: React.MouseEvent, id: string, dir: ResizeDir) => {
     e.stopPropagation();
     const a = assets.find(x => x.id === id)!;
+    if (a.compositeId) return;
     const children = a.category === 'Infrastructure'
       ? assets.filter(c => c.canvasRoomId === id).map(c => ({ id: c.id, x: c.x, y: c.y, w: c.w, h: c.h }))
       : [];
@@ -386,6 +450,8 @@ export default function CanvasPage() {
 
   const handleRotateMouseDown = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+    const a = assets.find(x => x.id === id)!;
+    if (a.compositeId) return;
     interactionRef.current = { type: 'rotate', id, startX: e.clientX, startY: e.clientY };
   };
 
@@ -440,6 +506,25 @@ export default function CanvasPage() {
     toast.success('Ungrouped');
   };
 
+  const saveSelectedAsComposite = async (name: string) => {
+    if (selected.size < 2) { toast('Select at least 2 assets to create a composite'); return; }
+    const sel = assets.filter(a => selected.has(a.id));
+    const minX = Math.min(...sel.map(a => a.x));
+    const minY = Math.min(...sel.map(a => a.y));
+    try {
+      await createCompositeTemplate(name, sel.map(a => ({
+        assetDefinitionId: a.assetDefinitionId,
+        relX: a.x - minX, relY: a.y - minY,
+        width: a.w, height: a.h,
+        rotation: a.rotation,
+      })));
+      await refetchComposites();
+      toast.success(`Composite "${name}" saved`);
+      setShowCreateComposite(false);
+      setNewCompositeName('');
+    } catch { toast.error('Failed to save composite'); }
+  };
+
   const deleteSelected = () => {
     const selectedList = assets.filter(a => selected.has(a.id));
     const blocked  = selectedList.filter(a => ACTIVE_TICKET_CONDITIONS.has(a.condition));
@@ -486,6 +571,7 @@ export default function CanvasPage() {
       condition: 'Good',
       groupId: null,
       groupLabel: null,
+      compositeId: null,
     };
     setAssets(prev => [...prev, next]);
     markUnsaved();
@@ -681,6 +767,71 @@ export default function CanvasPage() {
 
       {/* ── Right panel ───────────────────────────────────────────────────── */}
       <div className="w-64 bg-white border-l border-gray-200 pt-12 flex flex-col overflow-hidden flex-shrink-0">
+        {/* Composites section */}
+        <div className="border-b border-gray-100">
+          <div className="px-4 py-3 flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Composites</p>
+              <p className="text-xs text-gray-400 mt-0.5">Drag to place a locked group</p>
+            </div>
+            {user?.role === 'SuperAdmin' && selected.size >= 2 && (
+              <button
+                onClick={() => setShowCreateComposite(true)}
+                className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                title="Save selection as composite"
+              >+ Save
+              </button>
+            )}
+          </div>
+          {showCreateComposite && (
+            <div className="px-3 pb-3 flex gap-1">
+              <input
+                autoFocus
+                className="flex-1 text-xs border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                placeholder="Template name…"
+                value={newCompositeName}
+                onChange={e => setNewCompositeName(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') saveSelectedAsComposite(newCompositeName); if (e.key === 'Escape') { setShowCreateComposite(false); setNewCompositeName(''); } }}
+              />
+              <button onClick={() => saveSelectedAsComposite(newCompositeName)} className="text-xs bg-blue-500 text-white px-2 rounded hover:bg-blue-600">Save</button>
+            </div>
+          )}
+          <div className="px-3 pb-2 space-y-1 max-h-40 overflow-y-auto">
+            {compositeTemplates.map(tpl => {
+              const allDefs = rules?.assetsByCategory.flatMap(c => c.assetDefinitions.map(d => ({ ...d, category: c.category }))) ?? [];
+              const enriched = {
+                ...tpl,
+                items: tpl.items.map(item => {
+                  const def = allDefs.find(d => d.id === item.assetDefinitionId);
+                  return { ...item, svgUrl: def?.svgUrl ?? '', allowedLocations: def?.allowedLocations ?? [], category: def?.category ?? '' };
+                }),
+              };
+              return (
+                <div
+                  key={tpl.id}
+                  draggable
+                  onDragStart={e => e.dataTransfer.setData('composite-template', JSON.stringify(enriched))}
+                  className="flex items-center justify-between gap-2 p-2 rounded-lg border border-purple-100 bg-purple-50 hover:border-purple-300 cursor-grab active:cursor-grabbing select-none"
+                >
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-purple-800 truncate">{tpl.name}</p>
+                    <p className="text-xs text-purple-400">{tpl.items.length} assets</p>
+                  </div>
+                  {user?.role === 'SuperAdmin' && (
+                    <button
+                      onClick={async e => { e.stopPropagation(); await deleteCompositeTemplate(tpl.id); refetchComposites(); }}
+                      className="text-purple-300 hover:text-red-400 flex-shrink-0"
+                    ><XIcon size={12} /></button>
+                  )}
+                </div>
+              );
+            })}
+            {compositeTemplates.length === 0 && (
+              <p className="text-xs text-gray-300 py-1">No composites yet</p>
+            )}
+          </div>
+        </div>
+
         <div className="px-4 py-3 border-b border-gray-100">
           <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Assets</p>
           <p className="text-xs text-gray-400 mt-0.5">Drag onto the canvas</p>
@@ -843,6 +994,13 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, o
       {a.groupLabel && (
         <div style={{ position: 'absolute', top: -20 / zoom, left: 0 }} className="pointer-events-none">
           <span style={{ fontSize: 12 / zoom, padding: `0 ${4 / zoom}px` }} className="bg-violet-100 text-violet-700 rounded">{a.groupLabel}</span>
+        </div>
+      )}
+
+      {/* Composite badge */}
+      {a.compositeId && (
+        <div style={{ position: 'absolute', top: -20 / zoom, right: 0 }} className="pointer-events-none">
+          <span style={{ fontSize: 11 / zoom, padding: `0 ${4 / zoom}px` }} className="bg-purple-100 text-purple-600 rounded">⬡</span>
         </div>
       )}
 

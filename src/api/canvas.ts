@@ -1,5 +1,5 @@
 import api from './client';
-import type { RoomDetail, ChecklistView, CanvasAsset } from '../types';
+import type { RoomDetail, ChecklistView, CanvasAsset, CompositeTemplate } from '../types';
 
 export const getRoom = (roomId: string) =>
   api.get<RoomDetail>(`/room-design/rooms/${roomId}`).then(r => r.data);
@@ -38,7 +38,25 @@ export const saveLayout = (roomId: string, assets: CanvasAsset[]) =>
     GroupId:           a.groupId,
     GroupLabel:        a.groupLabel,
     CanvasRoomId:      a.canvasRoomId,
+    CompositeId:       a.compositeId,
   })));
+
+export const getCompositeTemplates = () =>
+  api.get<CompositeTemplate[]>('/room-design/composite-templates').then(r => r.data);
+
+export const createCompositeTemplate = (name: string, items: {
+  assetDefinitionId: string; relX: number; relY: number;
+  width: number; height: number; rotation: number;
+}[]) =>
+  api.post<{ id: string }>('/room-design/composite-templates', { Name: name, Items: items.map(i => ({
+    AssetDefinitionId: i.assetDefinitionId,
+    RelX: i.relX, RelY: i.relY,
+    Width: i.width, Height: i.height,
+    Rotation: i.rotation,
+  })) }).then(r => r.data);
+
+export const deleteCompositeTemplate = (id: string) =>
+  api.delete(`/room-design/composite-templates/${id}`);
 
 export const reportTicket = (
   placedAssetId: string, roomId: string, facultyId: string, description: string

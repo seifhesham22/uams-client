@@ -13,6 +13,7 @@ import AdminBuildingsPage from './pages/admin/BuildingsPage';
 import DepartmentsPage from './pages/admin/DepartmentsPage';
 import ManagersPage from './pages/admin/ManagersPage';
 import AssetDefinitionsPage from './pages/admin/AssetDefinitionsPage';
+import CompositeDesignerPage from './pages/admin/CompositeDesignerPage';
 // Asset Manager pages
 import AMDashboardPage from './pages/asset-manager/DashboardPage';
 import AMBuildingsPage from './pages/asset-manager/BuildingsPage';
@@ -55,6 +56,7 @@ export default function App() {
           <Route path="departments" element={<DepartmentsPage />} />
           <Route path="managers"    element={<ManagersPage />} />
           <Route path="assets"      element={<AssetDefinitionsPage />} />
+          <Route path="composites"  element={<CompositeDesignerPage />} />
         </Route>
 
         {/* ── Asset Manager ────────────────────────────────────────────────── */}
