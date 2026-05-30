@@ -187,12 +187,30 @@ export default function CanvasPage() {
 
   const markUnsaved = () => setSaveStatus('unsaved');
 
+  // ── undo history ─────────────────────────────────────────────────────────────
+  // We never mutate asset objects in place, so snapshotting the array reference
+  // before each change is enough to restore it later.
+  const historyRef = useRef<CanvasAsset[][]>([]);
+  const pushHistory = () => {
+    historyRef.current.push(assets);
+    if (historyRef.current.length > 60) historyRef.current.shift();
+  };
+  const undo = () => {
+    let prev = historyRef.current.pop();
+    while (prev && prev === assets) prev = historyRef.current.pop();  // skip no-op snapshots
+    if (!prev) { toast('Nothing to undo'); return; }
+    setAssets(prev);
+    setSelected(new Set());
+    markUnsaved();
+  };
+
   // ── room (polygon) operations ────────────────────────────────────────────────
   const addRoom = () => {
     if (assets.some(a => a.assetDefinitionId === ROOM_DEF_ID)) {
       toast.error('Only one room is allowed on the canvas.');
       return;
     }
+    pushHistory();
     const geo = defaultRoomGeometry(CANVAS_W / 2, CANVAS_H / 2);
     const bbox = geoBBox(geo);
     setAssets(prev => [...prev, {
@@ -363,6 +381,7 @@ export default function CanvasPage() {
     // ── composite template drop ──────────────────────────────────────────────
     const rawComposite = e.dataTransfer.getData('composite-template');
     if (rawComposite) {
+      pushHistory();
       const tpl: CompositeTemplate & { items: (CompositeTemplate['items'][0] & { svgUrl: string; allowedLocations: string[]; category: string })[] } = JSON.parse(rawComposite);
       const rect = canvasRef.current!.getBoundingClientRect();
       const ox = Math.max(0, (e.clientX - rect.left) / zoomRef.current);
@@ -432,6 +451,7 @@ export default function CanvasPage() {
       return;
     }
 
+    pushHistory();
     const existingCount = assets.filter(a => a.assetDefinitionId === def.id).length;
     const next: CanvasAsset = {
       id: newId(), assetDefinitionId: def.id,
@@ -488,6 +508,7 @@ export default function CanvasPage() {
             .map(x => x.id)
         : [];
       const dragIds = [...baseIds, ...childIds];
+      pushHistory();
       interactionRef.current = {
         type: 'drag',
         ids: dragIds,
@@ -508,6 +529,7 @@ export default function CanvasPage() {
     e.stopPropagation();
     const a = assets.find(x => x.id === id)!;
     if (a.compositeId) return;
+    pushHistory();
     const children = a.category === 'Infrastructure'
       ? assets.filter(c => c.canvasRoomId === id).map(c => ({ id: c.id, x: c.x, y: c.y, w: c.w, h: c.h }))
       : [];
@@ -518,11 +540,13 @@ export default function CanvasPage() {
     e.stopPropagation();
     const a = assets.find(x => x.id === id)!;
     if (a.compositeId) return;
+    pushHistory();
     interactionRef.current = { type: 'rotate', id, startX: e.clientX, startY: e.clientY };
   };
 
   const handleGroupResizeMouseDown = (e: React.MouseEvent) => {
     e.stopPropagation();
+    pushHistory();
     const sel = assets.filter(a => selected.has(a.id));
     const minX = Math.min(...sel.map(a => a.x));
     const minY = Math.min(...sel.map(a => a.y));
@@ -538,9 +562,10 @@ export default function CanvasPage() {
 
   const handleGroupRotateMouseDown = (e: React.MouseEvent) => {
     e.stopPropagation();
-    const sel = assets.filter(a => selected.has(a.id));
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
+    pushHistory();
+    const sel = assets.filter(a => selected.has(a.id));
     const minX = Math.min(...sel.map(a => a.x));
     const minY = Math.min(...sel.map(a => a.y));
     const maxX = Math.max(...sel.map(a => a.x + a.w));
@@ -559,6 +584,7 @@ export default function CanvasPage() {
   // ── group ─────────────────────────────────────────────────────────────────
   const groupSelected = () => {
     if (selected.size < 2) { toast('Select at least 2 assets to group'); return; }
+    pushHistory();
     const gid = newId();
     const label = `Group ${Date.now().toString().slice(-4)}`;
     setAssets(prev => prev.map(a => selected.has(a.id) ? { ...a, groupId: gid, groupLabel: label } : a));
@@ -567,6 +593,7 @@ export default function CanvasPage() {
   };
 
   const ungroupSelected = () => {
+    pushHistory();
     setAssets(prev => prev.map(a => selected.has(a.id) ? { ...a, groupId: null, groupLabel: null } : a));
     markUnsaved();
     toast.success('Ungrouped');
@@ -605,6 +632,7 @@ export default function CanvasPage() {
     }
     if (deletable.length === 0) return;
 
+    pushHistory();
     const deletableIds = new Set(deletable.map(a => a.id));
     setAssets(prev => prev.filter(a => !deletableIds.has(a.id)));
     setSelected(new Set());
@@ -626,6 +654,7 @@ export default function CanvasPage() {
   const duplicateAsset = (assetId: string) => {
     const src = assets.find(a => a.id === assetId);
     if (!src) return;
+    pushHistory();
     const baseName = src.assetName.replace(/ #\d+$/, '');
     const sameDefCount = assets.filter(a => a.assetDefinitionId === src.assetDefinitionId).length;
     const next: CanvasAsset = {
@@ -640,6 +669,40 @@ export default function CanvasPage() {
       compositeId: null,
     };
     setAssets(prev => [...prev, next]);
+    markUnsaved();
+  };
+
+  // Duplicate every selected asset (Ctrl+D). The room can't be duplicated.
+  // Group / composite links are remapped so a duplicated group stays its own group.
+  const duplicateSelected = () => {
+    const sel = assets.filter(a => selected.has(a.id) && a.assetDefinitionId !== ROOM_DEF_ID);
+    if (sel.length === 0) return;
+    pushHistory();
+    const counts = new Map<string, number>();
+    assets.forEach(a => counts.set(a.assetDefinitionId, (counts.get(a.assetDefinitionId) ?? 0) + 1));
+    const groupMap = new Map<string, string>();
+    const compMap  = new Map<string, string>();
+    const remap = (map: Map<string, string>, id: string | null) => {
+      if (!id) return null;
+      if (!map.has(id)) map.set(id, newId());
+      return map.get(id)!;
+    };
+    const dupes: CanvasAsset[] = sel.map(src => {
+      const n = (counts.get(src.assetDefinitionId) ?? 0) + 1;
+      counts.set(src.assetDefinitionId, n);
+      const baseName = src.assetName.replace(/ #\d+$/, '');
+      return {
+        ...src,
+        id: newId(),
+        assetName: `${baseName} #${n}`,
+        x: src.x + 24, y: src.y + 24,
+        condition: 'Good',
+        groupId: remap(groupMap, src.groupId),
+        compositeId: remap(compMap, src.compositeId),
+      };
+    });
+    setAssets(prev => [...prev, ...dupes]);
+    setSelected(new Set(dupes.map(d => d.id)));
     markUnsaved();
   };
 
@@ -662,6 +725,24 @@ export default function CanvasPage() {
     },
     onError: (e: any) => toast.error(e?.response?.data?.message ?? 'Failed to report'),
   });
+
+  // ── keyboard shortcuts: Del = delete, Ctrl/Cmd+Z = undo, Ctrl/Cmd+D = duplicate ──
+  const kbRef = useRef({ deleteSelected, duplicateSelected, undo, selectedSize: selected.size });
+  kbRef.current = { deleteSelected, duplicateSelected, undo, selectedSize: selected.size };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); kbRef.current.undo(); return; }
+      if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); kbRef.current.duplicateSelected(); return; }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && kbRef.current.selectedSize > 0) {
+        e.preventDefault(); kbRef.current.deleteSelected();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   if (roomLoading) return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-100">
@@ -762,6 +843,7 @@ export default function CanvasPage() {
               onTranslate={translateRoom}
               onSelect={() => { setSelected(new Set([roomAsset.id])); setContextMenu(null); }}
               onToolConsumed={() => setStructureTool('none')}
+              onInteractStart={pushHistory}
             />
           )}
 

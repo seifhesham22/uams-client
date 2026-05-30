@@ -1,9 +1,11 @@
 import { useEffect, useRef } from 'react';
 import {
   type RoomGeometry, type OpeningType,
-  edgePts, lerp, nearestEdge, clampOpeningT, centroid,
+  edgePts, lerp, nearestEdge, clampOpeningT, centroid, projectT, dist,
   DEFAULT_DOOR_W, DEFAULT_WINDOW_W,
 } from './canvasHelpers';
+
+const MIN_OPEN = 24;  // smallest opening span along a wall
 
 const FLOOR        = '#eef2f6';
 const FLOOR_SEL    = '#e2edfb';
@@ -30,17 +32,19 @@ interface Props {
   onTranslate: (dx: number, dy: number) => void;  // whole-room move (parent moves children too)
   onSelect: () => void;
   onToolConsumed: () => void;
+  onInteractStart: () => void;                     // snapshot for undo before an edit begins
 }
 
 type Drag =
   | { kind: 'vertex'; index: number }
   | { kind: 'edge'; index: number; ax: number; ay: number; bx: number; by: number; nx: number; ny: number; sx: number; sy: number }
   | { kind: 'room'; lastX: number; lastY: number }
-  | { kind: 'opening'; id: string };
+  | { kind: 'opening'; id: string }
+  | { kind: 'opening-resize'; id: string; edge: number; len: number; fixedS: number; sign: number };
 
 export default function RoomLayer({
   geo, zoom, selected, tool, width, height,
-  onGeometryChange, onTranslate, onSelect, onToolConsumed,
+  onGeometryChange, onTranslate, onSelect, onToolConsumed, onInteractStart,
 }: Props) {
   const svgRef  = useRef<SVGSVGElement>(null);
   const dragRef = useRef<Drag | null>(null);
@@ -83,6 +87,17 @@ export default function RoomLayer({
           o.id === d.id ? { ...o, edge: ne.edge, t: clampOpeningT(g, ne.edge, ne.t, o.width) } : o
         );
         cbRef.current.onGeometryChange({ ...g, openings });
+      } else if (d.kind === 'opening-resize') {
+        // Drag one end of the opening; the opposite end stays fixed.
+        const { a, b } = edgePts(g, d.edge);
+        const s = projectT(a, b, p) * d.len;
+        const width = Math.max(MIN_OPEN, Math.min(d.len, Math.abs(s - d.fixedS)));
+        const centerS = d.fixedS + d.sign * width / 2;
+        const t = Math.min(1, Math.max(0, centerS / d.len));
+        const openings = g.openings.map(o =>
+          o.id === d.id ? { ...o, width, t: clampOpeningT(g, d.edge, t, width) } : o
+        );
+        cbRef.current.onGeometryChange({ ...g, openings });
       } else if (d.kind === 'room') {
         cbRef.current.onTranslate(p.x - d.lastX, p.y - d.lastY);
         d.lastX = p.x; d.lastY = p.y;
@@ -100,6 +115,7 @@ export default function RoomLayer({
   // ── placement: clicking a wall while a tool is active drops an opening ───────
   const placeOpening = (e: React.MouseEvent) => {
     e.stopPropagation();
+    onInteractStart();
     const p = toCanvas(e.clientX, e.clientY);
     const ne = nearestEdge(geo, p);
     const w = tool === 'door' ? DEFAULT_DOOR_W : DEFAULT_WINDOW_W;
@@ -112,8 +128,10 @@ export default function RoomLayer({
     onToolConsumed();
   };
 
-  const deleteOpening = (id: string) =>
+  const deleteOpening = (id: string) => {
+    onInteractStart();
     onGeometryChange({ ...geo, openings: geo.openings.filter(o => o.id !== id) });
+  };
 
   // ── geometry for rendering ──────────────────────────────────────────────────
   const pts  = geo.vertices.map(v => `${v.x},${v.y}`).join(' ');
@@ -167,6 +185,7 @@ export default function RoomLayer({
           e.stopPropagation();
           if (tool !== 'none') { placeOpening(e); return; }
           onSelect();
+          onInteractStart();
           const p = toCanvas(e.clientX, e.clientY);
           dragRef.current = { kind: 'room', lastX: p.x, lastY: p.y };
         }}
@@ -202,7 +221,7 @@ export default function RoomLayer({
           key={o.id}
           transform={`translate(${c.x},${c.y}) rotate(${deg})`}
           style={{ pointerEvents: 'auto', cursor: 'grab' }}
-          onMouseDown={e => { e.stopPropagation(); dragRef.current = { kind: 'opening', id: o.id }; }}
+          onMouseDown={e => { e.stopPropagation(); onInteractStart(); dragRef.current = { kind: 'opening', id: o.id }; }}
           onDoubleClick={e => { e.stopPropagation(); deleteOpening(o.id); }}
         >
           {/* invisible fat hit area along the opening */}
@@ -228,6 +247,26 @@ export default function RoomLayer({
               <line x1={-o.width / 2} y1={0} x2={ o.width / 2} y2={0} stroke={GLASS} strokeWidth={1.5} />
             </>
           )}
+
+          {/* End handles to resize the opening width along the wall */}
+          {selected && tool === 'none' && (() => {
+            const { a, b } = edgePts(geo, o.edge);
+            const len = dist(a, b) || 1;
+            const centerS = o.t * len;
+            const hs = 9 / zoom;
+            return [1, -1].map(sgn => (
+              <rect
+                key={sgn}
+                x={sgn * o.width / 2 - hs / 2} y={-hs / 2} width={hs} height={hs} rx={1.5 / zoom}
+                fill="#fff" stroke={HANDLE} strokeWidth={1.5 / zoom}
+                style={{ pointerEvents: 'auto', cursor: 'ew-resize' }}
+                onMouseDown={e => {
+                  e.stopPropagation(); onInteractStart();
+                  dragRef.current = { kind: 'opening-resize', id: o.id, edge: o.edge, len, fixedS: centerS - sgn * o.width / 2, sign: sgn };
+                }}
+              />
+            ));
+          })()}
         </g>
       ))}
 
@@ -247,7 +286,7 @@ export default function RoomLayer({
             fill={HANDLE} stroke="#fff" strokeWidth={2 / zoom}
             style={{ pointerEvents: 'auto', cursor }}
             onMouseDown={e => {
-              e.stopPropagation(); onSelect();
+              e.stopPropagation(); onSelect(); onInteractStart();
               const p = toCanvas(e.clientX, e.clientY);
               dragRef.current = { kind: 'edge', index: i, ax: a.x, ay: a.y, bx: b.x, by: b.y, nx, ny, sx: p.x, sy: p.y };
             }}
@@ -262,7 +301,7 @@ export default function RoomLayer({
           cx={v.x} cy={v.y} r={handleR}
           fill="#fff" stroke={HANDLE} strokeWidth={2 / zoom}
           style={{ pointerEvents: 'auto', cursor: 'nwse-resize' }}
-          onMouseDown={e => { e.stopPropagation(); onSelect(); dragRef.current = { kind: 'vertex', index: i }; }}
+          onMouseDown={e => { e.stopPropagation(); onSelect(); onInteractStart(); dragRef.current = { kind: 'vertex', index: i }; }}
         />
       ))}
 
