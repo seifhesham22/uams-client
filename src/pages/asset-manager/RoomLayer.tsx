@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import {
   type RoomGeometry, type OpeningType,
   edgePts, lerp, nearestEdge, clampOpeningT, centroid, projectT, dist,
-  DEFAULT_DOOR_W, DEFAULT_WINDOW_W,
+  defaultWidthFor, cutsWall,
 } from './canvasHelpers';
 
 const MIN_OPEN = 24;  // smallest opening span along a wall
@@ -13,6 +13,8 @@ const WALL_COLOR   = '#3f4654';
 const HANDLE       = '#2563eb';
 const SYMBOL       = '#334155';
 const GLASS        = '#3b82f6';
+const SOCKET       = '#059669';   // electrical — emerald
+const RADIATOR     = '#ea7a3c';   // heating — warm orange
 
 function newId() { return crypto.randomUUID(); }
 
@@ -118,7 +120,7 @@ export default function RoomLayer({
     onInteractStart();
     const p = toCanvas(e.clientX, e.clientY);
     const ne = nearestEdge(geo, p);
-    const w = tool === 'door' ? DEFAULT_DOOR_W : DEFAULT_WINDOW_W;
+    const w = defaultWidthFor(tool as OpeningType);
     const opening = {
       id: newId(), edge: ne.edge,
       t: clampOpeningT(geo, ne.edge, ne.t, w),
@@ -168,7 +170,8 @@ export default function RoomLayer({
       <defs>
         <mask id={maskId}>
           <rect x={bx} y={by} width={bw} height={bh} fill="white" />
-          {frames.map(({ o, c, deg }) => (
+          {/* Only doors & windows cut a gap; sockets & radiators sit on the wall. */}
+          {frames.filter(({ o }) => cutsWall(o.type)).map(({ o, c, deg }) => (
             <g key={o.id} transform={`translate(${c.x},${c.y}) rotate(${deg})`}>
               <rect x={-o.width / 2} y={-(wall + 6) / 2} width={o.width} height={wall + 6} fill="black" />
             </g>
@@ -239,13 +242,40 @@ export default function RoomLayer({
                 fill="none" stroke={SYMBOL} strokeWidth={1.25} strokeDasharray="5 4"
               />
             </>
-          ) : (
+          ) : o.type === 'window' ? (
             <>
               {/* window: outer frame lines + glass */}
               <line x1={-o.width / 2} y1={-wall / 2} x2={ o.width / 2} y2={-wall / 2} stroke={SYMBOL} strokeWidth={2} />
               <line x1={-o.width / 2} y1={ wall / 2} x2={ o.width / 2} y2={ wall / 2} stroke={SYMBOL} strokeWidth={2} />
               <line x1={-o.width / 2} y1={0} x2={ o.width / 2} y2={0} stroke={GLASS} strokeWidth={1.5} />
             </>
+          ) : o.type === 'socket' ? (
+            <>
+              {/* electrical socket — small disc on the wall with two prongs */}
+              <circle cx={0} cy={0} r={Math.min(o.width, wall * 1.6) / 2} fill="#fff" stroke={SOCKET} strokeWidth={2} />
+              <line x1={-3} y1={-wall * 0.3} x2={-3} y2={wall * 0.3} stroke={SOCKET} strokeWidth={2} />
+              <line x1={ 3} y1={-wall * 0.3} x2={ 3} y2={wall * 0.3} stroke={SOCKET} strokeWidth={2} />
+            </>
+          ) : (
+            (() => {
+              {/* radiator / wall heater — ribbed panel on the interior side of the wall */}
+              const d = wall * 1.1;
+              const yNear = inward * (wall / 2);
+              const yFar  = inward * (wall / 2 + d);
+              const y0 = Math.min(yNear, yFar);
+              const finCount = Math.max(3, Math.round(o.width / 12));
+              const fins = [];
+              for (let k = 0; k <= finCount; k++) {
+                const fx = -o.width / 2 + (o.width * k) / finCount;
+                fins.push(<line key={k} x1={fx} y1={y0} x2={fx} y2={y0 + d} stroke={RADIATOR} strokeWidth={1.25} />);
+              }
+              return (
+                <>
+                  <rect x={-o.width / 2} y={y0} width={o.width} height={d} fill="#fff" stroke={RADIATOR} strokeWidth={1.75} rx={2} />
+                  {fins}
+                </>
+              );
+            })()
           )}
 
           {/* End handles to resize the opening width along the wall */}

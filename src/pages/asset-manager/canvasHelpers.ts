@@ -13,12 +13,30 @@ export function toDirectUrl(url: string): string {
 // containment / z-index logic keeps working.
 export const ROOM_DEF_ID = '00000000-0000-4000-8000-000000000001';
 
-export const WALL_T = 16;            // wall thickness in canvas units
-export const DEFAULT_DOOR_W   = 70;  // door opening span along the wall
-export const DEFAULT_WINDOW_W = 100; // window opening span along the wall
+export const WALL_T = 16;              // wall thickness in canvas units
+export const DEFAULT_DOOR_W     = 70;  // door opening span along the wall
+export const DEFAULT_WINDOW_W   = 100; // window opening span along the wall
+export const DEFAULT_SOCKET_W   = 26;  // electrical socket — small wall fixture
+export const DEFAULT_RADIATOR_W = 130; // wall heater / radiator span along the wall
 
 export interface Vec { x: number; y: number; }
-export type OpeningType = 'door' | 'window';
+// door & window cut a gap in the wall; socket & radiator are mounted on it (no gap).
+export type OpeningType = 'door' | 'window' | 'socket' | 'radiator';
+
+// Default span along the wall for a freshly placed fixture.
+export function defaultWidthFor(type: OpeningType): number {
+  switch (type) {
+    case 'door':     return DEFAULT_DOOR_W;
+    case 'window':   return DEFAULT_WINDOW_W;
+    case 'socket':   return DEFAULT_SOCKET_W;
+    case 'radiator': return DEFAULT_RADIATOR_W;
+  }
+}
+
+// Only doors and windows are true openings that cut through the wall.
+export function cutsWall(type: OpeningType): boolean {
+  return type === 'door' || type === 'window';
+}
 
 export interface Opening {
   id: string;

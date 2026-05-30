@@ -17,7 +17,7 @@ import {
   type RoomGeometry,
 } from './canvasHelpers';
 import RoomLayer from './RoomLayer';
-import { DoorOpen, AppWindow, Square } from 'lucide-react';
+import { DoorOpen, AppWindow, Square, Plug, Thermometer } from 'lucide-react';
 
 // ── canvas constants ──────────────────────────────────────────────────────────
 const CANVAS_W = 1400;
@@ -28,6 +28,14 @@ const AUTOSAVE_MS = 15_000;
 const ACTIVE_TICKET_CONDITIONS = new Set(['Reported', 'UnderMaintenance']);
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 3;
+
+// Visual style per non-"Good" asset condition, used by the Issues panel.
+const CONDITION_STYLE: Record<string, { label: string; dot: string; text: string }> = {
+  Reported:         { label: 'Reported',          dot: 'bg-amber-400', text: 'text-amber-700' },
+  UnderMaintenance: { label: 'Under Maintenance',  dot: 'bg-blue-400',  text: 'text-blue-700'  },
+  Irreparable:      { label: 'Irreparable',        dot: 'bg-red-500',   text: 'text-red-700'   },
+  Replaced:         { label: 'Replaced',           dot: 'bg-teal-400',  text: 'text-teal-700'  },
+};
 
 // ── helper ────────────────────────────────────────────────────────────────────
 function newId() { return crypto.randomUUID(); }
@@ -98,9 +106,12 @@ export default function CanvasPage() {
   const [newCompositeName,    setNewCompositeName]    = useState('');
 
   // ── structural room (polygon) ───────────────────────────────────────────────
-  const [structureTool, setStructureTool] = useState<'none' | 'door' | 'window'>('none');
+  const [structureTool, setStructureTool] = useState<'none' | 'door' | 'window' | 'socket' | 'radiator'>('none');
   const roomAsset = assets.find(a => a.assetDefinitionId === ROOM_DEF_ID) ?? null;
   const roomGeo   = roomAsset ? parseGeometry(roomAsset.metadata) : null;
+
+  // Assets with any non-"Good" condition — surfaced in the left Issues panel.
+  const issueAssets = assets.filter(a => a.condition !== 'Good' && a.assetDefinitionId !== ROOM_DEF_ID);
 
   // Track which room object triggered the last full reset so we can tell
   // whether a re-run is caused by `room` changing or only `rules` changing.
@@ -712,6 +723,20 @@ export default function CanvasPage() {
     markUnsaved();
   };
 
+  // Center the view on an asset (and select it) so the user can see it — handy when
+  // the working area has drifted far from the origin.
+  const focusAsset = (id: string) => {
+    const a = assets.find(x => x.id === id);
+    if (!a) return;
+    const targetZoom = Math.max(zoom, 1);
+    const ax = a.x + a.w / 2;
+    const ay = a.y + a.h / 2;
+    setZoom(targetZoom);
+    setPan({ x: -(ax - CANVAS_W / 2) * targetZoom, y: -(ay - CANVAS_H / 2) * targetZoom });
+    setSelected(new Set([id]));
+    setContextMenu(null);
+  };
+
   // ── report / checklist ────────────────────────────────────────────────────
   const submitReport = useMutation({
     mutationFn: async () => {
@@ -798,6 +823,48 @@ export default function CanvasPage() {
         <Button size="sm" onClick={() => doSave()}>
           <Save size={13} /> Save
         </Button>
+      </div>
+
+      {/* ── Left panel: reported / problem assets ────────────────────────── */}
+      <div className="w-56 bg-white border-r border-gray-200 pt-12 flex flex-col overflow-hidden flex-shrink-0">
+        <div className="px-4 py-3 border-b border-gray-100">
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-1.5">
+            <AlertTriangle size={13} className="text-amber-500" />
+            Issues
+            {issueAssets.length > 0 && (
+              <span className="ml-auto bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[11px] font-semibold">
+                {issueAssets.length}
+              </span>
+            )}
+          </p>
+          <p className="text-xs text-gray-400 mt-0.5">Click to locate the asset</p>
+        </div>
+        <div className="flex-1 overflow-y-auto scrollbar-thin">
+          {issueAssets.length === 0 ? (
+            <div className="px-4 py-6 text-center">
+              <p className="text-xs text-gray-300">No reported assets</p>
+            </div>
+          ) : (
+            issueAssets.map(a => {
+              const s = CONDITION_STYLE[a.condition] ?? { label: a.condition, dot: 'bg-gray-400', text: 'text-gray-600' };
+              return (
+                <button
+                  key={a.id}
+                  onClick={() => focusAsset(a.id)}
+                  className={`w-full text-left px-4 py-2.5 border-b border-gray-50 hover:bg-gray-50 transition-colors flex items-center gap-2.5 ${
+                    selected.has(a.id) ? 'bg-blue-50' : ''
+                  }`}
+                >
+                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${s.dot}`} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm text-gray-800 truncate">{a.assetName}</span>
+                    <span className={`text-[11px] ${s.text}`}>{s.label}</span>
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
       </div>
 
       {/* ── Canvas area — fills full viewport, no scroll ─────────────────── */}
@@ -974,10 +1041,30 @@ export default function CanvasPage() {
               <AppWindow size={16} />
               <span className="text-[11px]">Window</span>
             </button>
+            <button
+              onClick={() => setStructureTool(t => t === 'socket' ? 'none' : 'socket')}
+              disabled={!roomAsset}
+              className={`flex flex-col items-center gap-1 py-2 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                structureTool === 'socket' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-gray-200 text-gray-600 hover:border-emerald-300 hover:bg-emerald-50'
+              }`}
+            >
+              <Plug size={16} />
+              <span className="text-[11px]">Socket</span>
+            </button>
+            <button
+              onClick={() => setStructureTool(t => t === 'radiator' ? 'none' : 'radiator')}
+              disabled={!roomAsset}
+              className={`flex flex-col items-center gap-1 py-2 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                structureTool === 'radiator' ? 'border-orange-500 bg-orange-50 text-orange-700' : 'border-gray-200 text-gray-600 hover:border-orange-300 hover:bg-orange-50'
+              }`}
+            >
+              <Thermometer size={16} />
+              <span className="text-[11px]">Radiator</span>
+            </button>
           </div>
           {structureTool !== 'none' && (
             <p className="px-4 pb-3 -mt-1 text-[11px] text-blue-600">
-              Click a wall to place the {structureTool}. Double-click an opening to remove it.
+              Click a wall to place the {structureTool}. Double-click it to remove it.
             </p>
           )}
         </div>
