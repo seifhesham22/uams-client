@@ -13,7 +13,7 @@ import type { CanvasAsset, PanelCategory, RoomDetail, CompositeTemplate } from '
 import { Button } from '../../components/ui/Button';
 import {
   toDirectUrl, ROOM_DEF_ID,
-  defaultRoomGeometry, parseGeometry, serializeGeometry, geoBBox, pointInPolygon,
+  defaultRoomGeometry, parseGeometry, serializeGeometry, geoBBox, pointInPolygon, nearestEdge,
   type RoomGeometry,
 } from './canvasHelpers';
 import RoomLayer from './RoomLayer';
@@ -32,17 +32,22 @@ const ZOOM_MAX = 3;
 // ── helper ────────────────────────────────────────────────────────────────────
 function newId() { return crypto.randomUUID(); }
 
-function rectContains(a: CanvasAsset, px: number, py: number) {
-  return px >= a.x && px <= a.x + a.w && py >= a.y && py <= a.y + a.h;
+// Do a footprint (rx,ry,rw,rh) and an asset's rectangle overlap at all?
+function rectsOverlap(rx: number, ry: number, rw: number, rh: number, a: CanvasAsset) {
+  return rx < a.x + a.w && rx + rw > a.x && ry < a.y + a.h && ry + rh > a.y;
 }
 
-// Which room polygon (if any) contains the canvas point — used to assign canvasRoomId.
+// Which room (if any) the canvas point belongs to — used to assign canvasRoomId and
+// validate InWall placement. Counts the wall band (plus a small margin) as "inside",
+// so dropping something right on a wall still registers as being in the room.
 function roomIdAt(list: CanvasAsset[], px: number, py: number): string | null {
   const room = list.find(a => a.assetDefinitionId === ROOM_DEF_ID);
   if (!room) return null;
   const g = parseGeometry(room.metadata);
   if (!g) return null;
-  return pointInPolygon({ x: px, y: py }, g.vertices) ? room.id : null;
+  const p = { x: px, y: py };
+  if (pointInPolygon(p, g.vertices)) return room.id;
+  return nearestEdge(g, p).dist <= g.wall ? room.id : null;
 }
 
 // ── main page ─────────────────────────────────────────────────────────────────
@@ -384,8 +389,8 @@ export default function CanvasPage() {
       pushHistory();
       const tpl: CompositeTemplate & { items: (CompositeTemplate['items'][0] & { svgUrl: string; allowedLocations: string[]; category: string })[] } = JSON.parse(rawComposite);
       const rect = canvasRef.current!.getBoundingClientRect();
-      const ox = Math.max(0, (e.clientX - rect.left) / zoomRef.current);
-      const oy = Math.max(0, (e.clientY - rect.top)  / zoomRef.current);
+      const ox = (e.clientX - rect.left) / zoomRef.current;
+      const oy = (e.clientY - rect.top)  / zoomRef.current;
       const cid = newId();
       const roomUnderId = roomIdAt(assets, ox, oy);
       setAssets(prev => [
@@ -417,22 +422,20 @@ export default function CanvasPage() {
     const def: { id: string; name: string; svgUrl: string; allowedLocations: string[]; category: string } = JSON.parse(raw);
 
     const rect = canvasRef.current!.getBoundingClientRect();
-    const x = Math.max(0, Math.min(CANVAS_W - DEFAULT_W, (e.clientX - rect.left) / zoomRef.current - DEFAULT_W / 2));
-    const y = Math.max(0, Math.min(CANVAS_H - DEFAULT_H, (e.clientY - rect.top)  / zoomRef.current - DEFAULT_H / 2));
+    // Map cursor → canvas coords. No bounds clamp: the working area can extend past the
+    // nominal CANVAS_W/H (assets and the room may live anywhere on the plane), and clamping
+    // would yank the drop back to the canvas corner.
+    const x = (e.clientX - rect.left) / zoomRef.current - DEFAULT_W / 2;
+    const y = (e.clientY - rect.top)  / zoomRef.current - DEFAULT_H / 2;
 
     const dropCx = x + DEFAULT_W / 2;
     const dropCy = y + DEFAULT_H / 2;
 
-    // Only one room allowed on the canvas at a time.
-    if (def.category === 'Infrastructure' && assets.some(a => a.category === 'Infrastructure')) {
-      toast.error('Only one room is allowed on the canvas.');
-      return;
-    }
-
-    // Placement rule: OnSurface must land on a non-Infrastructure asset (room floor doesn't count).
+    // Placement rule: an OnSurface-only asset must overlap another placed asset
+    // (the room floor itself doesn't count as a surface).
     if (def.allowedLocations.includes('OnSurface') &&
         !def.allowedLocations.some(l => l !== 'OnSurface') &&
-        !assets.some(a => a.category !== 'Infrastructure' && rectContains(a, dropCx, dropCy))) {
+        !assets.some(a => a.assetDefinitionId !== ROOM_DEF_ID && rectsOverlap(x, y, DEFAULT_W, DEFAULT_H, a))) {
       toast.error(`"${def.name}" can only be placed on top of another asset (OnSurface rule)`);
       return;
     }
@@ -521,6 +524,9 @@ export default function CanvasPage() {
 
   const handleAssetDoubleClick = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+    // Double-click singles out this asset (even inside a composite) so its border shows
+    // and the context menu acts on it specifically.
+    setSelected(new Set([id]));
     const areaRect = canvasAreaRef.current!.getBoundingClientRect();
     setContextMenu({ assetId: id, x: e.clientX - areaRect.left, y: e.clientY - areaRect.top });
   };
@@ -1183,10 +1189,12 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, o
       onMouseDown={e => onMouseDown(e, a.id)}
       onDoubleClick={e => onDoubleClick(e, a.id)}
     >
-      {/* Inner visual container: border + rounded corners + overflow-hidden for the image only */}
+      {/* Inner visual container: border + rounded corners + overflow-hidden for the image only.
+          A composite member shows its blue border only when singled out (size-1 selection via
+          double-click); when the whole composite is selected the group box covers it instead. */}
       <div
         className={`w-full h-full rounded border-2 overflow-hidden transition-shadow ${
-          isSelected ? 'border-blue-500 shadow-lg shadow-blue-200' : (conditionBorder[a.condition] ?? 'border-transparent')
+          isSelected && (!a.compositeId || showHandles) ? 'border-blue-500 shadow-lg shadow-blue-200' : (conditionBorder[a.condition] ?? 'border-transparent')
         }`}
       >
         <img
@@ -1206,15 +1214,8 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, o
         </div>
       )}
 
-      {/* Composite badge */}
-      {a.compositeId && (
-        <div style={{ position: 'absolute', top: -20 / zoom, right: 0 }} className="pointer-events-none">
-          <span style={{ fontSize: 11 / zoom, padding: `0 ${4 / zoom}px` }} className="bg-purple-100 text-purple-600 rounded">⬡</span>
-        </div>
-      )}
-
-      {/* Name + rotation inputs — below the asset */}
-      {isSelected && showHandles && (
+      {/* Name + rotation inputs — below the asset (not for composite members) */}
+      {isSelected && showHandles && !a.compositeId && (
         <div
           style={{ position: 'absolute', bottom: -(54 / zoom), left: 0, right: 0 }}
           onMouseDown={e => e.stopPropagation()}
@@ -1239,8 +1240,9 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, o
         </div>
       )}
 
-      {/* Handles — outside overflow-hidden so they are fully visible and clickable */}
-      {isSelected && showHandles && (
+      {/* Handles — outside overflow-hidden so they are fully visible and clickable
+          (composite members can't be individually resized/rotated, so no handles) */}
+      {isSelected && showHandles && !a.compositeId && (
         <>
           {/* Rotation handle */}
           <div
