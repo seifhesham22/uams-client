@@ -39,6 +39,7 @@ export const saveLayout = (roomId: string, assets: CanvasAsset[]) =>
     GroupLabel:        a.groupLabel,
     CanvasRoomId:      a.canvasRoomId,
     CompositeId:       a.compositeId,
+    Metadata:          a.metadata,
   })));
 
 export const getCompositeTemplates = () =>

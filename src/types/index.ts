@@ -126,6 +126,7 @@ export interface CanvasAsset {
   condition: string;
   canvasRoomId: string | null;
   compositeId: string | null;
+  metadata: string | null;   // structural polygon JSON (room); null for ordinary assets
 }
 
 export interface CompositeTemplateItem {
@@ -157,6 +158,7 @@ export interface RoomDetail {
       x: number; y: number; width: number; height: number; rotation: number;
       condition: string; groupId: string | null; groupLabel: string | null;
       canvasRoomId: string | null; compositeId: string | null;
+      metadata: string | null;
     }[];
   };
 }

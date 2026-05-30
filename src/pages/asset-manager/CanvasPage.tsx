@@ -11,7 +11,13 @@ import { useAuthStore } from '../../store/authStore';
 import { getRoom, getPlacementRules, saveLayout, reportTicket, getChecklist, updateChecklistEntry, getCompositeTemplates, createCompositeTemplate, deleteCompositeTemplate } from '../../api/canvas';
 import type { CanvasAsset, PanelCategory, RoomDetail, CompositeTemplate } from '../../types';
 import { Button } from '../../components/ui/Button';
-import { toDirectUrl } from './canvasHelpers';
+import {
+  toDirectUrl, ROOM_DEF_ID,
+  defaultRoomGeometry, parseGeometry, serializeGeometry, geoBBox, pointInPolygon,
+  type RoomGeometry,
+} from './canvasHelpers';
+import RoomLayer from './RoomLayer';
+import { DoorOpen, AppWindow, Square } from 'lucide-react';
 
 // ── canvas constants ──────────────────────────────────────────────────────────
 const CANVAS_W = 1400;
@@ -28,6 +34,15 @@ function newId() { return crypto.randomUUID(); }
 
 function rectContains(a: CanvasAsset, px: number, py: number) {
   return px >= a.x && px <= a.x + a.w && py >= a.y && py <= a.y + a.h;
+}
+
+// Which room polygon (if any) contains the canvas point — used to assign canvasRoomId.
+function roomIdAt(list: CanvasAsset[], px: number, py: number): string | null {
+  const room = list.find(a => a.assetDefinitionId === ROOM_DEF_ID);
+  if (!room) return null;
+  const g = parseGeometry(room.metadata);
+  if (!g) return null;
+  return pointInPolygon({ x: px, y: py }, g.vertices) ? room.id : null;
 }
 
 // ── main page ─────────────────────────────────────────────────────────────────
@@ -77,6 +92,11 @@ export default function CanvasPage() {
   const [showCreateComposite, setShowCreateComposite] = useState(false);
   const [newCompositeName,    setNewCompositeName]    = useState('');
 
+  // ── structural room (polygon) ───────────────────────────────────────────────
+  const [structureTool, setStructureTool] = useState<'none' | 'door' | 'window'>('none');
+  const roomAsset = assets.find(a => a.assetDefinitionId === ROOM_DEF_ID) ?? null;
+  const roomGeo   = roomAsset ? parseGeometry(roomAsset.metadata) : null;
+
   // Track which room object triggered the last full reset so we can tell
   // whether a re-run is caused by `room` changing or only `rules` changing.
   const prevRoomRef = useRef<typeof room | null>(null);
@@ -102,7 +122,7 @@ export default function CanvasPage() {
           assetName:         p.assetName,
           svgUrl:            def?.svgUrl ?? '',
           allowedLocations:  def?.allowedLocations ?? [],
-          category:          def?.category ?? '',
+          category:          def?.category ?? (p.assetDefinitionId === ROOM_DEF_ID ? 'Infrastructure' : ''),
           x: p.x, y: p.y, w: p.width, h: p.height,
           rotation:   p.rotation,
           groupId:    p.groupId,
@@ -110,6 +130,7 @@ export default function CanvasPage() {
           condition:  p.condition,
           canvasRoomId: p.canvasRoomId,
           compositeId: p.compositeId ?? null,
+          metadata:   p.metadata ?? null,
         };
       }));
     } else {
@@ -145,6 +166,7 @@ export default function CanvasPage() {
               condition: a.condition,
               canvasRoomId: a.canvasRoomId,
               compositeId: a.compositeId,
+              metadata: a.metadata,
             })),
           },
         }
@@ -164,6 +186,54 @@ export default function CanvasPage() {
   }, [saveStatus, doSave]);
 
   const markUnsaved = () => setSaveStatus('unsaved');
+
+  // ── room (polygon) operations ────────────────────────────────────────────────
+  const addRoom = () => {
+    if (assets.some(a => a.assetDefinitionId === ROOM_DEF_ID)) {
+      toast.error('Only one room is allowed on the canvas.');
+      return;
+    }
+    const geo = defaultRoomGeometry(CANVAS_W / 2, CANVAS_H / 2);
+    const bbox = geoBBox(geo);
+    setAssets(prev => [...prev, {
+      id: newId(), assetDefinitionId: ROOM_DEF_ID,
+      assetName: 'Room', svgUrl: '', allowedLocations: [],
+      category: 'Infrastructure',
+      x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h, rotation: 0,
+      groupId: null, groupLabel: null, condition: 'Good',
+      canvasRoomId: null, compositeId: null,
+      metadata: serializeGeometry(geo),
+    }]);
+    markUnsaved();
+  };
+
+  const updateRoomGeometry = (geo: RoomGeometry) => {
+    const bbox = geoBBox(geo);
+    setAssets(prev => prev.map(a =>
+      a.assetDefinitionId === ROOM_DEF_ID
+        ? { ...a, metadata: serializeGeometry(geo), x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h }
+        : a
+    ));
+    markUnsaved();
+  };
+
+  // Move the whole room and every asset living inside it by (dx, dy).
+  const translateRoom = (dx: number, dy: number) => {
+    setAssets(prev => {
+      const room = prev.find(a => a.assetDefinitionId === ROOM_DEF_ID);
+      if (!room) return prev;
+      const geo = parseGeometry(room.metadata);
+      if (!geo) return prev;
+      const moved: RoomGeometry = { ...geo, vertices: geo.vertices.map(v => ({ x: v.x + dx, y: v.y + dy })) };
+      const meta = serializeGeometry(moved);
+      return prev.map(a => {
+        if (a.id === room.id) return { ...a, metadata: meta, x: a.x + dx, y: a.y + dy };
+        if (a.canvasRoomId === room.id) return { ...a, x: a.x + dx, y: a.y + dy };
+        return a;
+      });
+    });
+    markUnsaved();
+  };
 
   // Capture-phase document listener: zoom canvas on any scroll inside the canvas area.
   // Capture phase fires before passive optimisations on any child element.
@@ -267,17 +337,11 @@ export default function CanvasPage() {
     const onUp = () => {
       if (interactionRef.current) {
         interactionRef.current = null;
-        setAssets(prev => {
-          const rooms = prev.filter(r => r.category === 'Infrastructure');
-          return prev.map(a => {
-            if (a.category === 'Infrastructure') return a;
-            const cx = a.x + a.w / 2;
-            const cy = a.y + a.h / 2;
-            const roomUnder = rooms.find(r => rectContains(r, cx, cy));
-            const newRoomId = roomUnder?.id ?? null;
-            return newRoomId === a.canvasRoomId ? a : { ...a, canvasRoomId: newRoomId };
-          });
-        });
+        setAssets(prev => prev.map(a => {
+          if (a.assetDefinitionId === ROOM_DEF_ID) return a;
+          const newRoomId = roomIdAt(prev, a.x + a.w / 2, a.y + a.h / 2);
+          return newRoomId === a.canvasRoomId ? a : { ...a, canvasRoomId: newRoomId };
+        }));
         markUnsaved();
       }
       panRef.current = null;
@@ -304,7 +368,7 @@ export default function CanvasPage() {
       const ox = Math.max(0, (e.clientX - rect.left) / zoomRef.current);
       const oy = Math.max(0, (e.clientY - rect.top)  / zoomRef.current);
       const cid = newId();
-      const roomUnder = assets.find(a => a.category === 'Infrastructure' && rectContains(a, ox, oy));
+      const roomUnderId = roomIdAt(assets, ox, oy);
       setAssets(prev => [
         ...prev,
         ...tpl.items.map(item => ({
@@ -319,8 +383,9 @@ export default function CanvasPage() {
           rotation: item.rotation,
           groupId: null, groupLabel: null,
           condition: 'Good' as const,
-          canvasRoomId: roomUnder?.id ?? null,
+          canvasRoomId: roomUnderId,
           compositeId: cid,
+          metadata: null,
         })),
       ]);
       markUnsaved();
@@ -353,16 +418,16 @@ export default function CanvasPage() {
       return;
     }
 
-    // Find the Infrastructure asset (room/wall) under the drop point.
-    // Used for: InWall validation + auto-assigning canvasRoomId for every non-infra asset.
-    const roomUnder = def.category !== 'Infrastructure'
-      ? assets.find(a => a.category === 'Infrastructure' && rectContains(a, dropCx, dropCy))
-      : undefined;
+    // Which room polygon (if any) the drop lands inside.
+    // Used for: InWall validation + auto-assigning canvasRoomId for every asset.
+    const roomUnderId = def.category !== 'Infrastructure'
+      ? roomIdAt(assets, dropCx, dropCy)
+      : null;
 
     // Placement rule: InWall must be inside a room/wall structure
     const isInWallOnly = def.allowedLocations.includes('InWall') &&
       !def.allowedLocations.some((l: string) => l !== 'InWall');
-    if (isInWallOnly && !roomUnder) {
+    if (isInWallOnly && !roomUnderId) {
       toast.error(`"${def.name}" must be placed inside a room or wall structure (InWall rule)`);
       return;
     }
@@ -375,8 +440,9 @@ export default function CanvasPage() {
       category: def.category ?? '',
       x, y, w: DEFAULT_W, h: DEFAULT_H, rotation: 0,
       groupId: null, groupLabel: null, condition: 'Good',
-      canvasRoomId: roomUnder?.id ?? null,
+      canvasRoomId: roomUnderId,
       compositeId: null,
+      metadata: null,
     };
     setAssets(prev => [...prev, next]);
     markUnsaved();
@@ -683,8 +749,24 @@ export default function CanvasPage() {
           onDragLeave={() => setDragOver(false)}
           onMouseDown={() => { setSelected(new Set()); setContextMenu(null); }}
         >
-          {/* Placed assets */}
-          {assets.map(a => (
+          {/* Structural room (polygon floor + walls + doors/windows) */}
+          {roomAsset && roomGeo && (
+            <RoomLayer
+              geo={roomGeo}
+              zoom={zoom}
+              selected={selected.has(roomAsset.id)}
+              tool={structureTool}
+              width={CANVAS_W}
+              height={CANVAS_H}
+              onGeometryChange={updateRoomGeometry}
+              onTranslate={translateRoom}
+              onSelect={() => { setSelected(new Set([roomAsset.id])); setContextMenu(null); }}
+              onToolConsumed={() => setStructureTool('none')}
+            />
+          )}
+
+          {/* Placed assets (the room is drawn by RoomLayer, so skip it here) */}
+          {assets.filter(a => a.assetDefinitionId !== ROOM_DEF_ID).map(a => (
             <PlacedAssetEl
               key={a.id}
               asset={a}
@@ -767,6 +849,51 @@ export default function CanvasPage() {
 
       {/* ── Right panel ───────────────────────────────────────────────────── */}
       <div className="w-64 bg-white border-l border-gray-200 pt-12 flex flex-col overflow-hidden flex-shrink-0">
+        {/* Structure section */}
+        <div className="border-b border-gray-100">
+          <div className="px-4 py-3">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Structure</p>
+            <p className="text-xs text-gray-400 mt-0.5">
+              {roomAsset ? 'Drag corners to reshape · drag walls to add openings' : 'Add a room to start'}
+            </p>
+          </div>
+          <div className="px-3 pb-3 grid grid-cols-3 gap-1.5">
+            <button
+              onClick={addRoom}
+              disabled={!!roomAsset}
+              className="flex flex-col items-center gap-1 py-2 rounded-lg border border-gray-200 text-gray-600 hover:border-blue-300 hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              <Square size={16} />
+              <span className="text-[11px]">Room</span>
+            </button>
+            <button
+              onClick={() => setStructureTool(t => t === 'door' ? 'none' : 'door')}
+              disabled={!roomAsset}
+              className={`flex flex-col items-center gap-1 py-2 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                structureTool === 'door' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-blue-300 hover:bg-blue-50'
+              }`}
+            >
+              <DoorOpen size={16} />
+              <span className="text-[11px]">Door</span>
+            </button>
+            <button
+              onClick={() => setStructureTool(t => t === 'window' ? 'none' : 'window')}
+              disabled={!roomAsset}
+              className={`flex flex-col items-center gap-1 py-2 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                structureTool === 'window' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-blue-300 hover:bg-blue-50'
+              }`}
+            >
+              <AppWindow size={16} />
+              <span className="text-[11px]">Window</span>
+            </button>
+          </div>
+          {structureTool !== 'none' && (
+            <p className="px-4 pb-3 -mt-1 text-[11px] text-blue-600">
+              Click a wall to place the {structureTool}. Double-click an opening to remove it.
+            </p>
+          )}
+        </div>
+
         {/* Composites section */}
         <div className="border-b border-gray-100">
           <div className="px-4 py-3 flex items-center justify-between">
