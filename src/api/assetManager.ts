@@ -18,6 +18,12 @@ export const getMyRooms = (facultyId: string, page = 1, pageSize = 50) =>
 export const createRoom = (facultyId: string, buildingId: string, name: string) =>
   api.post<string>('/room-design/rooms', { facultyId, buildingId, name }).then(r => r.data);
 
+export const closeRoom = (roomId: string, reason: string) =>
+  api.post(`/room-design/rooms/${roomId}/close`, { Reason: reason });
+
+export const reopenRoom = (roomId: string) =>
+  api.post(`/room-design/rooms/${roomId}/reopen`);
+
 export const getMyTeachers = () =>
   api.get<AMTeacher[]>(`${AM}/teachers/faculties/my`).then(r => r.data);
 

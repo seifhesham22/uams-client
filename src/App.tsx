@@ -20,6 +20,7 @@ import AMBuildingsPage from './pages/asset-manager/BuildingsPage';
 import AMTeachersPage from './pages/asset-manager/TeachersPage';
 import AMStudentsPage from './pages/asset-manager/StudentsPage';
 import AMTicketsPage  from './pages/asset-manager/TicketsPage';
+import AMReportsPage  from './pages/asset-manager/ReportsPage';
 import CanvasPage from './pages/asset-manager/CanvasPage';
 import { DeptManagerLayout } from './components/layout/DeptManagerLayout';
 import DMDashboardPage   from './pages/dept-manager/DashboardPage';
@@ -71,6 +72,7 @@ export default function App() {
           <Route path="teachers"    element={<AMTeachersPage />} />
           <Route path="students"    element={<AMStudentsPage />} />
           <Route path="tickets"     element={<AMTicketsPage />} />
+          <Route path="reports"     element={<AMReportsPage />} />
           {/* Canvas is full-screen — it uses position:fixed to cover the layout */}
           <Route path="rooms/:roomId" element={<CanvasPage />} />
         </Route>

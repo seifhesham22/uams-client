@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, Save, ChevronDown, ChevronRight,
-  AlertTriangle, CheckSquare, RotateCw, X as XIcon, Users2, Copy, Ban, CheckCircle2,
+  AlertTriangle, CheckSquare, RotateCw, X as XIcon, Users2, Copy, Ban, CheckCircle2, Eye, Pencil,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuthStore } from '../../store/authStore';
@@ -25,8 +25,8 @@ const CANVAS_H = 900;
 const DEFAULT_W = 110;
 const DEFAULT_H = 55;
 const AUTOSAVE_MS = 15_000;
-// Conditions that mean the asset has an active issue — block deletion while one is open.
-const ACTIVE_TICKET_CONDITIONS = new Set(['Reported', 'UnderMaintenance', 'OutOfService']);
+// Conditions that mean the asset has an open ticket — block re-report / deletion.
+const ACTIVE_TICKET_CONDITIONS = new Set(['Pending', 'NotUsable']);
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 3;
 
@@ -56,8 +56,11 @@ export default function CanvasPage() {
   const { roomId } = useParams<{ roomId: string }>();
   const navigate    = useNavigate();
   const user        = useAuthStore(s => s.user);
-  // Teachers & students get a read-only canvas: view, report, checklist — no editing.
-  const readOnly    = user?.role === 'Teacher' || user?.role === 'Student';
+  // Teachers & students are always view-only. The asset manager can also flip the canvas to
+  // view-only via a toggle (and back to edit).
+  const isViewer    = user?.role === 'Teacher' || user?.role === 'Student';
+  const [manualReadOnly, setManualReadOnly] = useState(false);
+  const readOnly    = isViewer || manualReadOnly;
 
   const qc = useQueryClient();
 
@@ -105,7 +108,7 @@ export default function CanvasPage() {
   const roomGeo   = roomAsset ? parseGeometry(roomAsset.metadata) : null;
 
   // Assets with any non-"Good" condition — surfaced in the left Issues panel.
-  const issueAssets = assets.filter(a => a.condition !== 'Operational' && a.assetDefinitionId !== ROOM_DEF_ID);
+  const issueAssets = assets.filter(a => a.condition !== 'Usable' && a.assetDefinitionId !== ROOM_DEF_ID);
 
   // Track which room object triggered the last full reset so we can tell
   // whether a re-run is caused by `room` changing or only `rules` changing.
@@ -228,7 +231,7 @@ export default function CanvasPage() {
       assetName: 'Room', svgUrl: '', allowedLocations: [],
       category: 'Infrastructure',
       x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h, rotation: 0,
-      groupId: null, groupLabel: null, condition: 'Operational',
+      groupId: null, groupLabel: null, condition: 'Usable',
       canvasRoomId: null, compositeId: null,
       metadata: serializeGeometry(geo),
     }]);
@@ -412,7 +415,7 @@ export default function CanvasPage() {
           w: item.width, h: item.height,
           rotation: item.rotation,
           groupId: null, groupLabel: null,
-          condition: 'Operational' as const,
+          condition: 'Usable' as const,
           canvasRoomId: roomUnderId,
           compositeId: cid,
           metadata: null,
@@ -468,7 +471,7 @@ export default function CanvasPage() {
       svgUrl: def.svgUrl, allowedLocations: def.allowedLocations,
       category: def.category ?? '',
       x, y, w: DEFAULT_W, h: DEFAULT_H, rotation: 0,
-      groupId: null, groupLabel: null, condition: 'Operational',
+      groupId: null, groupLabel: null, condition: 'Usable',
       canvasRoomId: roomUnderId,
       compositeId: null,
       metadata: null,
@@ -678,7 +681,7 @@ export default function CanvasPage() {
       assetName: `${baseName} #${sameDefCount + 1}`,
       x: Math.min(CANVAS_W - src.w, src.x + 20),
       y: Math.min(CANVAS_H - src.h, src.y + 20),
-      condition: 'Operational',
+      condition: 'Usable',
       groupId: null,
       groupLabel: null,
       compositeId: null,
@@ -711,7 +714,7 @@ export default function CanvasPage() {
         id: newId(),
         assetName: `${baseName} #${n}`,
         x: src.x + 24, y: src.y + 24,
-        condition: 'Operational',
+        condition: 'Usable',
         groupId: remap(groupMap, src.groupId),
         compositeId: remap(compMap, src.compositeId),
       };
@@ -737,7 +740,7 @@ export default function CanvasPage() {
 
   // Directly set an asset's usable/not-usable condition on the canvas (always available to the AM,
   // including after a ticket is closed).
-  const setCondition = async (assetId: string, condition: 'Operational' | 'OutOfService') => {
+  const setCondition = async (assetId: string, condition: 'Usable' | 'NotUsable') => {
     if (!roomId) return;
     const prevAsset = assets.find(a => a.id === assetId);
     setAssets(prev => prev.map(a => a.id === assetId ? { ...a, condition } : a)); // optimistic
@@ -747,9 +750,9 @@ export default function CanvasPage() {
         ...old,
         layout: { ...old.layout, placedAssets: old.layout.placedAssets.map(p => p.id === assetId ? { ...p, condition } : p) },
       });
-      toast.success(condition === 'Operational' ? 'Marked usable' : 'Marked not usable');
+      toast.success(condition === 'Usable' ? 'Marked usable' : 'Marked not usable');
     } catch (e: any) {
-      setAssets(prev => prev.map(a => a.id === assetId ? { ...a, condition: prevAsset?.condition ?? 'Operational' } : a));
+      setAssets(prev => prev.map(a => a.id === assetId ? { ...a, condition: prevAsset?.condition ?? 'Usable' } : a));
       toast.error(e?.response?.data?.message ?? 'Failed to update condition');
     }
   };
@@ -765,7 +768,7 @@ export default function CanvasPage() {
     onSuccess: () => {
       toast.success('Ticket reported');
       setAssets(prev => prev.map(a =>
-        a.id === reportModal!.assetId ? { ...a, condition: 'Reported' } : a
+        a.id === reportModal!.assetId ? { ...a, condition: 'Pending' } : a
       ));
       qc.invalidateQueries({ queryKey: ['am-tickets'] });
       qc.invalidateQueries({ queryKey: ['am-action-count'] });
@@ -844,6 +847,12 @@ export default function CanvasPage() {
           <button onClick={() => setZoom(1)} className="text-xs text-gray-500 w-10 text-center hover:text-gray-800">{Math.round(zoom * 100)}%</button>
           <button onClick={() => setZoom(z => parseFloat(Math.min(ZOOM_MAX, z + 0.1).toFixed(1)))} className="px-2 py-1 text-sm hover:bg-gray-100 rounded">+</button>
         </div>
+        {/* Asset manager: flip between view-only and edit */}
+        {!isViewer && (
+          <Button size="sm" variant="secondary" onClick={() => { setManualReadOnly(v => !v); setSelected(new Set()); }}>
+            {manualReadOnly ? <><Pencil size={13} /> Edit</> : <><Eye size={13} /> View only</>}
+          </Button>
+        )}
         {!readOnly && (
           <Button size="sm" onClick={() => doSave()}>
             <Save size={13} /> Save
@@ -872,7 +881,9 @@ export default function CanvasPage() {
             </div>
           ) : (
             issueAssets.map(a => {
-              const s = { label: 'Not usable', dot: 'bg-red-500', text: 'text-red-600' };
+              const s = a.condition === 'Pending'
+                ? { label: 'Pending', dot: 'bg-amber-400', text: 'text-amber-700' }
+                : { label: 'Not usable', dot: 'bg-red-500', text: 'text-red-600' };
               return (
                 <button
                   key={a.id}
@@ -995,20 +1006,22 @@ export default function CanvasPage() {
             >
               {(() => {
                 const ctxAsset = assets.find(a => a.id === contextMenu.assetId);
-                const hasActiveTicket = ctxAsset && ACTIVE_TICKET_CONDITIONS.has(ctxAsset.condition);
                 const isInfrastructure = ctxAsset?.category === 'Infrastructure';
+                // Teachers/students can only report a usable asset; the asset manager can always report
+                // (e.g. an asset she marked not-usable). Backend still blocks a duplicate open ticket.
+                const blockReport = isViewer && ctxAsset?.condition !== 'Usable';
                 return !isInfrastructure ? (
                   <button
-                    disabled={!!hasActiveTicket}
+                    disabled={blockReport}
                     className={`flex items-center gap-2.5 w-full px-4 py-3 text-sm transition-colors ${
-                      hasActiveTicket
+                      blockReport
                         ? 'opacity-40 cursor-not-allowed text-gray-400'
                         : 'hover:bg-red-50 hover:text-red-600'
                     }`}
-                    onClick={() => { if (!hasActiveTicket) { setReportModal({ assetId: contextMenu.assetId }); setContextMenu(null); } }}
+                    onClick={() => { if (!blockReport) { setReportModal({ assetId: contextMenu.assetId }); setContextMenu(null); } }}
                   >
-                    <AlertTriangle size={15} className={hasActiveTicket ? 'text-gray-300' : 'text-red-500'} />
-                    {hasActiveTicket ? 'Already Reported' : 'Report Issue'}
+                    <AlertTriangle size={15} className={blockReport ? 'text-gray-300' : 'text-red-500'} />
+                    {blockReport ? 'Not reportable' : 'Report Issue'}
                   </button>
                 ) : null;
               })()}
@@ -1016,11 +1029,11 @@ export default function CanvasPage() {
               {!readOnly && (() => {
                 const ctxAsset = assets.find(a => a.id === contextMenu.assetId);
                 if (!ctxAsset || ctxAsset.category === 'Infrastructure') return null;
-                const usable = ctxAsset.condition === 'Operational';
+                const usable = ctxAsset.condition === 'Usable';
                 return (
                   <button
                     className="flex items-center gap-2.5 w-full px-4 py-3 text-sm transition-colors border-t border-gray-50 hover:bg-gray-50"
-                    onClick={() => { setCondition(contextMenu.assetId, usable ? 'OutOfService' : 'Operational'); setContextMenu(null); }}
+                    onClick={() => { setCondition(contextMenu.assetId, usable ? 'NotUsable' : 'Usable'); setContextMenu(null); }}
                   >
                     {usable
                       ? <><Ban size={15} className="text-red-500" /> Mark Not Usable</>
@@ -1286,8 +1299,10 @@ interface PlacedAssetElProps {
 }
 
 function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, onDoubleClick, onResizeMouseDown, onRotateMouseDown, onNameChange, onRotationChange }: PlacedAssetElProps) {
-  // Binary: usable assets get no border; anything not usable is flagged red.
-  const conditionBorder = a.condition === 'Operational' ? 'border-transparent' : 'border-red-500';
+  // Three states: usable = no border, pending = amber, not usable = red.
+  const conditionBorder = a.condition === 'Usable'  ? 'border-transparent'
+    : a.condition === 'Pending'                     ? 'border-amber-400'
+    : 'border-red-500';
 
   const zIndex = a.category === 'Infrastructure'                                        ? 1
     : a.allowedLocations.includes('UnderSurface')                                       ? 3

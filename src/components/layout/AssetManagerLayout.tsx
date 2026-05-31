@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { LayoutDashboard, Building2, Users, GraduationCap, Ticket, LogOut, ChevronRight, Menu, X } from 'lucide-react';
+import { LayoutDashboard, Building2, Users, GraduationCap, Ticket, BarChart3, LogOut, ChevronRight, Menu, X } from 'lucide-react';
 import { useState } from 'react';
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
@@ -12,6 +12,7 @@ const NAV = [
   { to: '/asset-manager/teachers',  icon: GraduationCap,   label: 'Teachers'                   },
   { to: '/asset-manager/students',  icon: Users,            label: 'Students'                   },
   { to: '/asset-manager/tickets',   icon: Ticket,           label: 'Tickets'                    },
+  { to: '/asset-manager/reports',   icon: BarChart3,        label: 'Reports'                    },
 ];
 
 export function AssetManagerLayout() {

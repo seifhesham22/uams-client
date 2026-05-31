@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Building2, ChevronRight, DoorOpen, Plus, PenLine } from 'lucide-react';
+import { Building2, ChevronRight, DoorOpen, Plus, PenLine, Lock, Unlock } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { toast } from 'sonner';
 import { useAuthStore } from '../../store/authStore';
-import { getMyBuildings, getMyRooms, createRoom } from '../../api/assetManager';
+import { getMyBuildings, getMyRooms, createRoom, closeRoom, reopenRoom } from '../../api/assetManager';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
@@ -163,10 +163,27 @@ export default function AMBuildingsPage() {
 
 function RoomCard({ room, delay }: { room: AMRoom; delay: number }) {
   const navigate = useNavigate();
+  const qc = useQueryClient();
+  const [closeOpen, setCloseOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const isClosed = room.status === 'Closed';
+
   const statusColor: Record<string, string> = {
     Open:   'bg-green-100 text-green-700',
     Closed: 'bg-gray-100 text-gray-500',
   };
+
+  const closeMut = useMutation({
+    mutationFn: () => closeRoom(room.id, reason.trim()),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['am-rooms'] }); toast.success('Room closed'); setCloseOpen(false); setReason(''); },
+    onError: (e: any) => toast.error(e?.response?.data?.message ?? 'Failed to close room'),
+  });
+  const reopenMut = useMutation({
+    mutationFn: () => reopenRoom(room.id),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['am-rooms'] }); toast.success('Room reopened'); },
+    onError: (e: any) => toast.error(e?.response?.data?.message ?? 'Failed to reopen room'),
+  });
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -184,12 +201,47 @@ function RoomCard({ room, delay }: { room: AMRoom; delay: number }) {
       <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${statusColor[room.status] ?? 'bg-gray-100 text-gray-500'}`}>
         {room.status}
       </span>
+      {isClosed ? (
+        <button
+          onClick={() => reopenMut.mutate()}
+          disabled={reopenMut.isPending}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors flex-shrink-0 disabled:opacity-50"
+        >
+          <Unlock size={12} /> Reopen
+        </button>
+      ) : (
+        <button
+          onClick={() => setCloseOpen(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-amber-50 hover:text-amber-700 transition-colors flex-shrink-0"
+        >
+          <Lock size={12} /> Close
+        </button>
+      )}
       <button
         onClick={() => navigate(`/asset-manager/rooms/${room.id}`)}
         className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex-shrink-0"
       >
         <PenLine size={12} /> Design
       </button>
+
+      <Modal open={closeOpen} onClose={() => { setCloseOpen(false); setReason(''); }} title={`Close ${room.name}`}>
+        <div className="space-y-4">
+          <p className="text-sm text-gray-500">Give a reason for closing this room (e.g. renovation, decommissioned). Teachers and students will see it as closed.</p>
+          <textarea
+            value={reason}
+            onChange={e => setReason(e.target.value)}
+            rows={3}
+            placeholder="Closure reason…"
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+          />
+          <div className="flex gap-3 pt-1">
+            <Button type="button" variant="secondary" className="flex-1" onClick={() => { setCloseOpen(false); setReason(''); }}>Cancel</Button>
+            <Button type="button" variant="danger" className="flex-1" loading={closeMut.isPending} disabled={reason.trim() === ''} onClick={() => closeMut.mutate()}>
+              <Lock size={13} /> Close Room
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </motion.div>
   );
 }

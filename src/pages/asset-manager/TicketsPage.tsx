@@ -30,8 +30,8 @@ type DeptForm = z.infer<typeof deptSchema>;
 // The only thing teachers & students need to know: can they use it or not.
 // The manager makes this call when escalating / closing / cancelling a ticket.
 const FINAL_CONDITION_OPTIONS = [
-  { value: 'Operational',  label: '✅ Usable' },
-  { value: 'OutOfService', label: '⛔ Not usable' },
+  { value: 'Usable',  label: '✅ Usable' },
+  { value: 'NotUsable', label: '⛔ Not usable' },
 ];
 
 const STATUS_COLOR: Record<string, string> = {
@@ -95,9 +95,9 @@ export default function AMTicketsPage() {
           if (type === 'fix')        return sendForFix(ticket.id, form.departmentId, form.note);
           return sendForReplacement(ticket.id, form.departmentId, form.note);
         }
-        case 'escalate': return escalateTicket(ticket.id, form.finalCondition || 'Operational', form.note);
+        case 'escalate': return escalateTicket(ticket.id, form.finalCondition || 'Usable', form.note);
         case 'confirm':  return confirmFix(ticket.id);
-        case 'close':    return closeTicket(ticket.id, form.finalCondition || 'Operational', form.note);
+        case 'close':    return closeTicket(ticket.id, form.finalCondition || 'Usable', form.note);
       }
     },
     onSuccess: () => {
@@ -112,7 +112,7 @@ export default function AMTicketsPage() {
 
   const openAction = (ticket: AMTicket, type: ActionType) => {
     setActionModal({ ticket, type });
-    reset({ finalCondition: 'Operational' });
+    reset({ finalCondition: 'Usable' });
   };
 
   const needsDept = actionModal?.type === 'inspection' || actionModal?.type === 'fix' || actionModal?.type === 'replacement';
