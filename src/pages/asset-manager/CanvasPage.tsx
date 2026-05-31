@@ -4,11 +4,11 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, Save, ChevronDown, ChevronRight,
-  AlertTriangle, CheckSquare, RotateCw, X as XIcon, Users2, Copy,
+  AlertTriangle, CheckSquare, RotateCw, X as XIcon, Users2, Copy, Ban, CheckCircle2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuthStore } from '../../store/authStore';
-import { getRoom, getPlacementRules, saveLayout, reportTicket, getChecklist, updateChecklistEntry, getCompositeTemplates, createCompositeTemplate, deleteCompositeTemplate } from '../../api/canvas';
+import { getRoom, getPlacementRules, saveLayout, reportTicket, getChecklist, updateChecklistEntry, setAssetCondition, getCompositeTemplates, createCompositeTemplate, deleteCompositeTemplate } from '../../api/canvas';
 import type { CanvasAsset, PanelCategory, RoomDetail, CompositeTemplate } from '../../types';
 import { Button } from '../../components/ui/Button';
 import {
@@ -25,17 +25,10 @@ const CANVAS_H = 900;
 const DEFAULT_W = 110;
 const DEFAULT_H = 55;
 const AUTOSAVE_MS = 15_000;
-const ACTIVE_TICKET_CONDITIONS = new Set(['Reported', 'UnderMaintenance']);
+// Conditions that mean the asset has an active issue — block deletion while one is open.
+const ACTIVE_TICKET_CONDITIONS = new Set(['Reported', 'UnderMaintenance', 'OutOfService']);
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 3;
-
-// Visual style per non-"Good" asset condition, used by the Issues panel.
-const CONDITION_STYLE: Record<string, { label: string; dot: string; text: string }> = {
-  Reported:         { label: 'Reported',          dot: 'bg-amber-400', text: 'text-amber-700' },
-  UnderMaintenance: { label: 'Under Maintenance',  dot: 'bg-blue-400',  text: 'text-blue-700'  },
-  Irreparable:      { label: 'Irreparable',        dot: 'bg-red-500',   text: 'text-red-700'   },
-  Replaced:         { label: 'Replaced',           dot: 'bg-teal-400',  text: 'text-teal-700'  },
-};
 
 // ── helper ────────────────────────────────────────────────────────────────────
 function newId() { return crypto.randomUUID(); }
@@ -63,7 +56,8 @@ export default function CanvasPage() {
   const { roomId } = useParams<{ roomId: string }>();
   const navigate    = useNavigate();
   const user        = useAuthStore(s => s.user);
-  const facultyId   = user?.facultyId ?? '';
+  // Teachers & students get a read-only canvas: view, report, checklist — no editing.
+  const readOnly    = user?.role === 'Teacher' || user?.role === 'Student';
 
   const qc = useQueryClient();
 
@@ -111,7 +105,7 @@ export default function CanvasPage() {
   const roomGeo   = roomAsset ? parseGeometry(roomAsset.metadata) : null;
 
   // Assets with any non-"Good" condition — surfaced in the left Issues panel.
-  const issueAssets = assets.filter(a => a.condition !== 'Good' && a.assetDefinitionId !== ROOM_DEF_ID);
+  const issueAssets = assets.filter(a => a.condition !== 'Operational' && a.assetDefinitionId !== ROOM_DEF_ID);
 
   // Track which room object triggered the last full reset so we can tell
   // whether a re-run is caused by `room` changing or only `rules` changing.
@@ -234,7 +228,7 @@ export default function CanvasPage() {
       assetName: 'Room', svgUrl: '', allowedLocations: [],
       category: 'Infrastructure',
       x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h, rotation: 0,
-      groupId: null, groupLabel: null, condition: 'Good',
+      groupId: null, groupLabel: null, condition: 'Operational',
       canvasRoomId: null, compositeId: null,
       metadata: serializeGeometry(geo),
     }]);
@@ -393,6 +387,7 @@ export default function CanvasPage() {
   const onCanvasDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragOver(false);
+    if (readOnly) return;   // teachers/students can't place assets
 
     // ── composite template drop ──────────────────────────────────────────────
     const rawComposite = e.dataTransfer.getData('composite-template');
@@ -417,7 +412,7 @@ export default function CanvasPage() {
           w: item.width, h: item.height,
           rotation: item.rotation,
           groupId: null, groupLabel: null,
-          condition: 'Good' as const,
+          condition: 'Operational' as const,
           canvasRoomId: roomUnderId,
           compositeId: cid,
           metadata: null,
@@ -473,7 +468,7 @@ export default function CanvasPage() {
       svgUrl: def.svgUrl, allowedLocations: def.allowedLocations,
       category: def.category ?? '',
       x, y, w: DEFAULT_W, h: DEFAULT_H, rotation: 0,
-      groupId: null, groupLabel: null, condition: 'Good',
+      groupId: null, groupLabel: null, condition: 'Operational',
       canvasRoomId: roomUnderId,
       compositeId: null,
       metadata: null,
@@ -486,6 +481,9 @@ export default function CanvasPage() {
   const handleAssetMouseDown = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (e.button !== 0) return;
+
+    // Read-only viewers can select (to report / view checklist) but never drag.
+    if (readOnly) { setSelected(new Set([id])); setContextMenu(null); return; }
 
     const a = assets.find(x => x.id === id)!;
     const compositeMembers = a.compositeId
@@ -680,7 +678,7 @@ export default function CanvasPage() {
       assetName: `${baseName} #${sameDefCount + 1}`,
       x: Math.min(CANVAS_W - src.w, src.x + 20),
       y: Math.min(CANVAS_H - src.h, src.y + 20),
-      condition: 'Good',
+      condition: 'Operational',
       groupId: null,
       groupLabel: null,
       compositeId: null,
@@ -713,7 +711,7 @@ export default function CanvasPage() {
         id: newId(),
         assetName: `${baseName} #${n}`,
         x: src.x + 24, y: src.y + 24,
-        condition: 'Good',
+        condition: 'Operational',
         groupId: remap(groupMap, src.groupId),
         compositeId: remap(compMap, src.compositeId),
       };
@@ -737,11 +735,32 @@ export default function CanvasPage() {
     setContextMenu(null);
   };
 
+  // Directly set an asset's usable/not-usable condition on the canvas (always available to the AM,
+  // including after a ticket is closed).
+  const setCondition = async (assetId: string, condition: 'Operational' | 'OutOfService') => {
+    if (!roomId) return;
+    const prevAsset = assets.find(a => a.id === assetId);
+    setAssets(prev => prev.map(a => a.id === assetId ? { ...a, condition } : a)); // optimistic
+    try {
+      await setAssetCondition(roomId, assetId, condition);
+      qc.setQueryData<RoomDetail>(['room', roomId], old => !old ? old : {
+        ...old,
+        layout: { ...old.layout, placedAssets: old.layout.placedAssets.map(p => p.id === assetId ? { ...p, condition } : p) },
+      });
+      toast.success(condition === 'Operational' ? 'Marked usable' : 'Marked not usable');
+    } catch (e: any) {
+      setAssets(prev => prev.map(a => a.id === assetId ? { ...a, condition: prevAsset?.condition ?? 'Operational' } : a));
+      toast.error(e?.response?.data?.message ?? 'Failed to update condition');
+    }
+  };
+
   // ── report / checklist ────────────────────────────────────────────────────
   const submitReport = useMutation({
     mutationFn: async () => {
-      await doSave();
-      await reportTicket(reportModal!.assetId, roomId!, facultyId, reportDesc);
+      // Teachers/students can't save the layout (read-only) — and don't need to;
+      // the asset already exists server-side. Asset managers persist any pending edits first.
+      if (!readOnly) await doSave();
+      await reportTicket(reportModal!.assetId, roomId!, room?.facultyId ?? '', reportDesc);
     },
     onSuccess: () => {
       toast.success('Ticket reported');
@@ -762,6 +781,7 @@ export default function CanvasPage() {
   kbRef.current = { deleteSelected, duplicateSelected, undo, selectedSize: selected.size };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (readOnly) return;   // teachers/students can't edit
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
       const mod = e.ctrlKey || e.metaKey;
@@ -792,19 +812,23 @@ export default function CanvasPage() {
           <ArrowLeft size={18} />
         </button>
         <span className="font-semibold text-gray-900 text-sm">{room?.name ?? '...'}</span>
-        <span className={`text-xs px-2 py-0.5 rounded-full ${
-          saveStatus === 'saved'   ? 'bg-green-100 text-green-700' :
-          saveStatus === 'saving'  ? 'bg-blue-100 text-blue-700' :
-          'bg-amber-100 text-amber-700'}`}>
-          {saveStatus === 'saved' ? '✓ Saved' : saveStatus === 'saving' ? 'Saving…' : '● Unsaved'}
-        </span>
+        {readOnly ? (
+          <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">View only</span>
+        ) : (
+          <span className={`text-xs px-2 py-0.5 rounded-full ${
+            saveStatus === 'saved'   ? 'bg-green-100 text-green-700' :
+            saveStatus === 'saving'  ? 'bg-blue-100 text-blue-700' :
+            'bg-amber-100 text-amber-700'}`}>
+            {saveStatus === 'saved' ? '✓ Saved' : saveStatus === 'saving' ? 'Saving…' : '● Unsaved'}
+          </span>
+        )}
         <div className="flex-1" />
-        {selected.size >= 2 && (
+        {!readOnly && selected.size >= 2 && (
           <Button size="sm" variant="secondary" onClick={groupSelected}>
             <Users2 size={13} /> Group
           </Button>
         )}
-        {selected.size >= 1 && (
+        {!readOnly && selected.size >= 1 && (
           <>
             <Button size="sm" variant="secondary" onClick={ungroupSelected}>Ungroup</Button>
             <Button
@@ -820,9 +844,11 @@ export default function CanvasPage() {
           <button onClick={() => setZoom(1)} className="text-xs text-gray-500 w-10 text-center hover:text-gray-800">{Math.round(zoom * 100)}%</button>
           <button onClick={() => setZoom(z => parseFloat(Math.min(ZOOM_MAX, z + 0.1).toFixed(1)))} className="px-2 py-1 text-sm hover:bg-gray-100 rounded">+</button>
         </div>
-        <Button size="sm" onClick={() => doSave()}>
-          <Save size={13} /> Save
-        </Button>
+        {!readOnly && (
+          <Button size="sm" onClick={() => doSave()}>
+            <Save size={13} /> Save
+          </Button>
+        )}
       </div>
 
       {/* ── Left panel: reported / problem assets ────────────────────────── */}
@@ -846,7 +872,7 @@ export default function CanvasPage() {
             </div>
           ) : (
             issueAssets.map(a => {
-              const s = CONDITION_STYLE[a.condition] ?? { label: a.condition, dot: 'bg-gray-400', text: 'text-gray-600' };
+              const s = { label: 'Not usable', dot: 'bg-red-500', text: 'text-red-600' };
               return (
                 <button
                   key={a.id}
@@ -914,9 +940,10 @@ export default function CanvasPage() {
               height={CANVAS_H}
               onGeometryChange={updateRoomGeometry}
               onTranslate={translateRoom}
-              onSelect={() => { setSelected(new Set([roomAsset.id])); setContextMenu(null); }}
+              onSelect={() => { if (!readOnly) { setSelected(new Set([roomAsset.id])); setContextMenu(null); } }}
               onToolConsumed={() => setStructureTool('none')}
               onInteractStart={pushHistory}
+              readOnly={readOnly}
             />
           )}
 
@@ -926,7 +953,7 @@ export default function CanvasPage() {
               key={a.id}
               asset={a}
               isSelected={selected.has(a.id)}
-              showHandles={selected.size === 1}
+              showHandles={!readOnly && selected.size === 1}
               zoom={zoom}
               onMouseDown={handleAssetMouseDown}
               onDoubleClick={handleAssetDoubleClick}
@@ -985,15 +1012,33 @@ export default function CanvasPage() {
                   </button>
                 ) : null;
               })()}
-              <button
-                className="flex items-center gap-2.5 w-full px-4 py-3 text-sm hover:bg-green-50 hover:text-green-600 transition-colors border-t border-gray-50"
-                onClick={() => { duplicateAsset(contextMenu.assetId); setContextMenu(null); }}
-              >
-                <Copy size={15} className="text-green-500" /> Duplicate
-              </button>
+              {/* Always-available usable/not-usable toggle (AM, regular assets) */}
+              {!readOnly && (() => {
+                const ctxAsset = assets.find(a => a.id === contextMenu.assetId);
+                if (!ctxAsset || ctxAsset.category === 'Infrastructure') return null;
+                const usable = ctxAsset.condition === 'Operational';
+                return (
+                  <button
+                    className="flex items-center gap-2.5 w-full px-4 py-3 text-sm transition-colors border-t border-gray-50 hover:bg-gray-50"
+                    onClick={() => { setCondition(contextMenu.assetId, usable ? 'OutOfService' : 'Operational'); setContextMenu(null); }}
+                  >
+                    {usable
+                      ? <><Ban size={15} className="text-red-500" /> Mark Not Usable</>
+                      : <><CheckCircle2 size={15} className="text-green-600" /> Mark Usable</>}
+                  </button>
+                );
+              })()}
+              {!readOnly && (
+                <button
+                  className="flex items-center gap-2.5 w-full px-4 py-3 text-sm hover:bg-green-50 hover:text-green-600 transition-colors border-t border-gray-50"
+                  onClick={() => { duplicateAsset(contextMenu.assetId); setContextMenu(null); }}
+                >
+                  <Copy size={15} className="text-green-500" /> Duplicate
+                </button>
+              )}
               <button
                 className="flex items-center gap-2.5 w-full px-4 py-3 text-sm hover:bg-blue-50 hover:text-blue-600 transition-colors border-t border-gray-50"
-                onClick={async () => { if (saveStatus === 'unsaved') await doSave(); setChecklistModal({ assetId: contextMenu.assetId }); setContextMenu(null); }}
+                onClick={async () => { if (!readOnly && saveStatus === 'unsaved') await doSave(); setChecklistModal({ assetId: contextMenu.assetId }); setContextMenu(null); }}
               >
                 <CheckSquare size={15} className="text-blue-500" /> View Checklist
               </button>
@@ -1002,7 +1047,8 @@ export default function CanvasPage() {
         </AnimatePresence>
       </div>
 
-      {/* ── Right panel ───────────────────────────────────────────────────── */}
+      {/* ── Right panel (editing tools — hidden for read-only viewers) ──────── */}
+      {!readOnly && (
       <div className="w-64 bg-white border-l border-gray-200 pt-12 flex flex-col overflow-hidden flex-shrink-0">
         {/* Structure section */}
         <div className="border-b border-gray-100">
@@ -1144,6 +1190,7 @@ export default function CanvasPage() {
           ))}
         </div>
       </div>
+      )}
 
       {/* ── Report modal ──────────────────────────────────────────────────── */}
       <AnimatePresence>
@@ -1182,7 +1229,7 @@ export default function CanvasPage() {
       {/* ── Checklist modal ───────────────────────────────────────────────── */}
       <AnimatePresence>
         {checklistModal && (
-          <ChecklistModalPanel assetId={checklistModal.assetId} onClose={() => setChecklistModal(null)} />
+          <ChecklistModalPanel assetId={checklistModal.assetId} readOnly={readOnly} onClose={() => setChecklistModal(null)} />
         )}
       </AnimatePresence>
     </div>
@@ -1239,13 +1286,8 @@ interface PlacedAssetElProps {
 }
 
 function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, onDoubleClick, onResizeMouseDown, onRotateMouseDown, onNameChange, onRotationChange }: PlacedAssetElProps) {
-  const conditionBorder: Record<string, string> = {
-    Good:             'border-transparent',
-    Reported:         'border-amber-400',
-    UnderMaintenance: 'border-blue-400',
-    Irreparable:      'border-red-500',
-    Replaced:         'border-teal-400',
-  };
+  // Binary: usable assets get no border; anything not usable is flagged red.
+  const conditionBorder = a.condition === 'Operational' ? 'border-transparent' : 'border-red-500';
 
   const zIndex = a.category === 'Infrastructure'                                        ? 1
     : a.allowedLocations.includes('UnderSurface')                                       ? 3
@@ -1281,7 +1323,7 @@ function PlacedAssetEl({ asset: a, isSelected, showHandles, zoom, onMouseDown, o
           double-click); when the whole composite is selected the group box covers it instead. */}
       <div
         className={`w-full h-full rounded border-2 overflow-hidden transition-shadow ${
-          isSelected && (!a.compositeId || showHandles) ? 'border-blue-500 shadow-lg shadow-blue-200' : (conditionBorder[a.condition] ?? 'border-transparent')
+          isSelected && (!a.compositeId || showHandles) ? 'border-blue-500 shadow-lg shadow-blue-200' : conditionBorder
         }`}
       >
         <img
@@ -1427,7 +1469,7 @@ function PanelAsset({ def, category }: { def: { id: string; name: string; svgUrl
 }
 
 // ── Checklist modal ───────────────────────────────────────────────────────────
-function ChecklistModalPanel({ assetId, onClose }: { assetId: string; onClose: () => void }) {
+function ChecklistModalPanel({ assetId, readOnly, onClose }: { assetId: string; readOnly?: boolean; onClose: () => void }) {
   const { data, refetch } = useQuery({
     queryKey: ['checklist', assetId],
     queryFn:  () => getChecklist(assetId),
@@ -1466,16 +1508,16 @@ function ChecklistModalPanel({ assetId, onClose }: { assetId: string; onClose: (
             {data.entries.map(entry => (
               <label
                 key={entry.id}
-                className={`flex items-start gap-3 p-3 rounded-xl cursor-pointer transition-colors ${
+                className={`flex items-start gap-3 p-3 rounded-xl transition-colors ${readOnly ? '' : 'cursor-pointer'} ${
                   entry.isChecked ? 'bg-green-50' : 'bg-gray-50 hover:bg-gray-100'
                 }`}
               >
                 <input
                   type="checkbox"
                   checked={entry.isChecked}
-                  disabled={toggling === entry.checklistItemId}
-                  onChange={() => toggle(data.id, entry.checklistItemId, entry.isChecked)}
-                  className="mt-0.5 w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500 flex-shrink-0 cursor-pointer disabled:cursor-wait"
+                  disabled={readOnly || toggling === entry.checklistItemId}
+                  onChange={() => { if (!readOnly) toggle(data.id, entry.checklistItemId, entry.isChecked); }}
+                  className="mt-0.5 w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500 flex-shrink-0 cursor-pointer disabled:cursor-not-allowed"
                 />
                 <div className="flex-1">
                   <p className={`text-sm ${entry.isChecked ? 'line-through text-gray-400' : 'text-gray-700'}`}>

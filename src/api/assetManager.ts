@@ -53,11 +53,12 @@ export const sendForFix = (ticketId: string, departmentId: string, note?: string
 export const sendForReplacement = (ticketId: string, departmentId: string, note?: string) =>
   api.post(`/tickets/${ticketId}/send-for-replacement`, { DepartmentId: departmentId, Note: note });
 
-export const escalateTicket = (ticketId: string, note?: string) =>
-  api.post(`/tickets/${ticketId}/escalate`, { Note: note });
+// finalCondition is the asset state to leave behind (Good | UnderMaintenance | Irreparable …)
+export const escalateTicket = (ticketId: string, finalCondition: string, note?: string) =>
+  api.post(`/tickets/${ticketId}/escalate`, { Note: note, FinalCondition: finalCondition });
 
 export const confirmFix = (ticketId: string) =>
   api.post(`/tickets/${ticketId}/confirm-fix`);
 
-export const closeTicket = (ticketId: string, note?: string) =>
-  api.post(`/tickets/${ticketId}/close`, { Note: note });
+export const closeTicket = (ticketId: string, finalCondition: string, note?: string) =>
+  api.post(`/tickets/${ticketId}/close`, { Note: note, FinalCondition: finalCondition });

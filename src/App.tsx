@@ -25,6 +25,11 @@ import { DeptManagerLayout } from './components/layout/DeptManagerLayout';
 import DMDashboardPage   from './pages/dept-manager/DashboardPage';
 import MaintainersPage   from './pages/dept-manager/MaintainersPage';
 import DMTicketsPage     from './pages/dept-manager/TicketsPage';
+// Teacher / Student (read-only viewer) portal
+import { ViewerLayout } from './components/layout/ViewerLayout';
+import ViewerFacultiesPage from './pages/viewer/FacultiesPage';
+import ViewerRoomsPage     from './pages/viewer/RoomsPage';
+import MyReportsPage       from './pages/viewer/MyReportsPage';
 import { useAuthStore } from './store/authStore';
 import type { Role } from './types';
 
@@ -75,6 +80,22 @@ export default function App() {
           <Route index                  element={<DMDashboardPage />} />
           <Route path="maintainers"     element={<MaintainersPage />} />
           <Route path="tickets"         element={<DMTicketsPage />} />
+        </Route>
+
+        {/* ── Teacher (read-only) ──────────────────────────────────────────── */}
+        <Route path="/teacher" element={<RequireRole role="Teacher"><ViewerLayout role="Teacher" /></RequireRole>}>
+          <Route index                    element={<ViewerFacultiesPage />} />
+          <Route path="faculty/:facultyId" element={<ViewerRoomsPage basePath="/teacher" />} />
+          <Route path="my-reports"        element={<MyReportsPage />} />
+          {/* Canvas is full-screen (position:fixed) and covers the layout */}
+          <Route path="rooms/:roomId"     element={<CanvasPage />} />
+        </Route>
+
+        {/* ── Student (read-only) ──────────────────────────────────────────── */}
+        <Route path="/student" element={<RequireRole role="Student"><ViewerLayout role="Student" /></RequireRole>}>
+          <Route index                element={<ViewerRoomsPage basePath="/student" />} />
+          <Route path="my-reports"    element={<MyReportsPage />} />
+          <Route path="rooms/:roomId" element={<CanvasPage />} />
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />

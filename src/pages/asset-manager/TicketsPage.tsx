@@ -20,8 +20,19 @@ type Tab = 'action' | 'all';
 
 // departmentId is conditionally required — validation enforced at mutation time, not schema level,
 // because confirm/close/escalate never mount that field so zodResolver always sees it as empty.
-const deptSchema = z.object({ departmentId: z.string().optional(), note: z.string().optional() });
+const deptSchema = z.object({
+  departmentId: z.string().optional(),
+  note: z.string().optional(),
+  finalCondition: z.string().optional(),
+});
 type DeptForm = z.infer<typeof deptSchema>;
+
+// The only thing teachers & students need to know: can they use it or not.
+// The manager makes this call when escalating / closing / cancelling a ticket.
+const FINAL_CONDITION_OPTIONS = [
+  { value: 'Operational',  label: '✅ Usable' },
+  { value: 'OutOfService', label: '⛔ Not usable' },
+];
 
 const STATUS_COLOR: Record<string, string> = {
   Open:                'bg-amber-100 text-amber-700',
@@ -84,9 +95,9 @@ export default function AMTicketsPage() {
           if (type === 'fix')        return sendForFix(ticket.id, form.departmentId, form.note);
           return sendForReplacement(ticket.id, form.departmentId, form.note);
         }
-        case 'escalate': return escalateTicket(ticket.id, form.note);
+        case 'escalate': return escalateTicket(ticket.id, form.finalCondition || 'Operational', form.note);
         case 'confirm':  return confirmFix(ticket.id);
-        case 'close':    return closeTicket(ticket.id, form.note);
+        case 'close':    return closeTicket(ticket.id, form.finalCondition || 'Operational', form.note);
       }
     },
     onSuccess: () => {
@@ -101,13 +112,26 @@ export default function AMTicketsPage() {
 
   const openAction = (ticket: AMTicket, type: ActionType) => {
     setActionModal({ ticket, type });
-    reset();
+    reset({ finalCondition: 'Operational' });
   };
 
   const needsDept = actionModal?.type === 'inspection' || actionModal?.type === 'fix' || actionModal?.type === 'replacement';
 
   // ── What actions are available per status ──────────────────────────────────
-  const getActions = (t: AMTicket): { label: string; type: ActionType; variant: 'primary' | 'secondary' | 'danger' }[] => {
+  type Action = { label: string; type: ActionType; variant: 'primary' | 'secondary' | 'danger' };
+  const TERMINAL = ['ConfirmedFixed', 'Closed', 'EscalatedExternally'];
+
+  const getActions = (t: AMTicket): Action[] => {
+    const actions = baseActions(t);
+    // The AM can always cancel/close an active ticket (e.g. reported by mistake) and set
+    // whether the asset stays usable — unless it's already terminal or has its own close.
+    if (!TERMINAL.includes(t.status) && !actions.some(a => a.type === 'close')) {
+      actions.push({ label: 'Cancel / Close', type: 'close', variant: 'secondary' });
+    }
+    return actions;
+  };
+
+  const baseActions = (t: AMTicket): Action[] => {
     switch (t.status) {
       case 'Open':
         return [
@@ -132,6 +156,12 @@ export default function AMTicketsPage() {
       case 'Replaced':
         return [
           { label: 'Confirm Fixed', type: 'confirm', variant: 'primary' },
+        ];
+      // Vendor / external party finished — let the AM set the final asset condition
+      // (e.g. mark it working again) and close the ticket.
+      case 'EscalatedExternally':
+        return [
+          { label: 'Resolve & Set Condition', type: 'close', variant: 'primary' },
         ];
       default:
         return [];
@@ -256,6 +286,14 @@ export default function AMTicketsPage() {
                 options={deptOptions}
                 error={errors.departmentId?.message}
                 {...register('departmentId')}
+              />
+            )}
+
+            {(actionModal.type === 'escalate' || actionModal.type === 'close') && (
+              <Select
+                label="Leave the asset as"
+                options={FINAL_CONDITION_OPTIONS}
+                {...register('finalCondition')}
               />
             )}
 

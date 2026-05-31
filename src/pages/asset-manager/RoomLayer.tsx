@@ -35,6 +35,7 @@ interface Props {
   onSelect: () => void;
   onToolConsumed: () => void;
   onInteractStart: () => void;                     // snapshot for undo before an edit begins
+  readOnly?: boolean;                              // teachers/students: render only, no editing
 }
 
 type Drag =
@@ -46,7 +47,7 @@ type Drag =
 
 export default function RoomLayer({
   geo, zoom, selected, tool, width, height,
-  onGeometryChange, onTranslate, onSelect, onToolConsumed, onInteractStart,
+  onGeometryChange, onTranslate, onSelect, onToolConsumed, onInteractStart, readOnly = false,
 }: Props) {
   const svgRef  = useRef<SVGSVGElement>(null);
   const dragRef = useRef<Drag | null>(null);
@@ -183,8 +184,9 @@ export default function RoomLayer({
       <polygon
         points={pts}
         fill={selected ? FLOOR_SEL : FLOOR}
-        style={{ pointerEvents: 'auto', cursor: tool === 'none' ? 'move' : 'crosshair' }}
+        style={{ pointerEvents: readOnly ? 'none' : 'auto', cursor: tool === 'none' ? 'move' : 'crosshair' }}
         onMouseDown={e => {
+          if (readOnly) return;
           e.stopPropagation();
           if (tool !== 'none') { placeOpening(e); return; }
           onSelect();
@@ -223,9 +225,9 @@ export default function RoomLayer({
         <g
           key={o.id}
           transform={`translate(${c.x},${c.y}) rotate(${deg})`}
-          style={{ pointerEvents: 'auto', cursor: 'grab' }}
-          onMouseDown={e => { e.stopPropagation(); onInteractStart(); dragRef.current = { kind: 'opening', id: o.id }; }}
-          onDoubleClick={e => { e.stopPropagation(); deleteOpening(o.id); }}
+          style={{ pointerEvents: readOnly ? 'none' : 'auto', cursor: 'grab' }}
+          onMouseDown={e => { if (readOnly) return; e.stopPropagation(); onInteractStart(); dragRef.current = { kind: 'opening', id: o.id }; }}
+          onDoubleClick={e => { if (readOnly) return; e.stopPropagation(); deleteOpening(o.id); }}
         >
           {/* invisible fat hit area along the opening */}
           <rect x={-o.width / 2} y={-(wall + 14) / 2} width={o.width} height={wall + 14} fill="transparent" />

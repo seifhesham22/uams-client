@@ -42,6 +42,10 @@ export const saveLayout = (roomId: string, assets: CanvasAsset[]) =>
     Metadata:          a.metadata,
   })));
 
+// Directly set a placed asset's condition (Operational = usable, OutOfService = not usable).
+export const setAssetCondition = (roomId: string, placedAssetId: string, condition: string) =>
+  api.put(`/room-design/rooms/${roomId}/placed-assets/${placedAssetId}/condition`, { Condition: condition });
+
 export const getCompositeTemplates = () =>
   api.get<CompositeTemplate[]>('/room-design/composite-templates').then(r => r.data);
 
