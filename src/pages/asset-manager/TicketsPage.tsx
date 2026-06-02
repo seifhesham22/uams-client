@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
-import { Ticket, ChevronDown, ChevronUp, MessageSquare } from 'lucide-react';
+import { Ticket, ChevronDown, ChevronUp, MessageSquare, History } from 'lucide-react';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -17,6 +17,9 @@ import { Select } from '../../components/ui/Select';
 import type { AMTicket } from '../../types';
 
 type Tab = 'action' | 'all';
+type StatusFilter = 'all' | 'open' | 'inProgress' | 'needsConfirmation' | 'closed';
+type TimeFilter = 'all' | '7' | '30';
+type SortOrder = 'newest' | 'oldest';
 
 // departmentId is conditionally required — validation enforced at mutation time, not schema level,
 // because confirm/close/escalate never mount that field so zodResolver always sees it as empty.
@@ -34,36 +37,60 @@ const FINAL_CONDITION_OPTIONS = [
   { value: 'NotUsable', label: '⛔ Not usable' },
 ];
 
-const STATUS_COLOR: Record<string, string> = {
-  Open:                'bg-amber-100 text-amber-700',
-  InspectionRequested: 'bg-blue-100 text-blue-700',
-  InspectionDone:      'bg-indigo-100 text-indigo-700',
-  SentForFix:          'bg-orange-100 text-orange-700',
-  AwaitingParts:       'bg-orange-100 text-orange-700',
-  Fixed:               'bg-green-100 text-green-700',
-  Irreparable:         'bg-red-100 text-red-700',
-  SentForReplacement:  'bg-orange-100 text-orange-700',
-  Replaced:            'bg-teal-100 text-teal-700',
-  ConfirmedFixed:      'bg-green-100 text-green-700',
-  EscalatedExternally: 'bg-purple-100 text-purple-700',
-  Closed:              'bg-gray-100 text-gray-500',
+// ── Status buckets ───────────────────────────────────────────────────────────
+// The AM only thinks in three phases. The 12 raw statuses collapse into these.
+//   open       → just reported, needs triage
+//   inProgress → anything being worked on (incl. Fixed/Replaced awaiting confirmation)
+//   closed     → terminal (resolved, written off, or handed to a vendor)
+type Bucket = 'open' | 'inProgress' | 'closed';
+const STATUS_BUCKET: Record<string, Bucket> = {
+  Open:                'open',
+  InspectionRequested: 'inProgress',
+  InspectionDone:      'inProgress',
+  SentForFix:          'inProgress',
+  AwaitingParts:       'inProgress',
+  SentForReplacement:  'inProgress',
+  Fixed:               'inProgress',
+  Replaced:            'inProgress',
+  ConfirmedFixed:      'closed',
+  Closed:              'closed',
+  EscalatedExternally: 'closed',
+  Irreparable:         'closed',
+};
+const bucketOf = (status: string): Bucket => STATUS_BUCKET[status] ?? 'inProgress';
+
+// Tickets the maintainer marked done — the AM still has to confirm the fix.
+const NEEDS_CONFIRMATION = new Set(['Fixed', 'Replaced']);
+
+const BUCKET_LABEL: Record<Bucket, string> = {
+  open: 'Open', inProgress: 'In Progress', closed: 'Closed',
+};
+const BUCKET_COLOR: Record<Bucket, string> = {
+  open:       'bg-amber-100 text-amber-700',
+  inProgress: 'bg-blue-100 text-blue-700',
+  closed:     'bg-gray-100 text-gray-500',
 };
 
+// Detailed labels kept as muted sub-text so the AM still has the full picture.
 const STATUS_LABEL: Record<string, string> = {
   Open: 'Open', InspectionRequested: 'Inspection Requested',
   InspectionDone: 'Inspection Done', SentForFix: 'Sent for Fix',
   AwaitingParts: 'Awaiting Parts', Fixed: 'Fixed', Irreparable: 'Irreparable',
   SentForReplacement: 'Sent for Replacement', Replaced: 'Replaced',
-  ConfirmedFixed: 'Confirmed Fixed', EscalatedExternally: 'Escalated',
+  ConfirmedFixed: 'Confirmed Fixed', EscalatedExternally: 'Escalated Externally',
   Closed: 'Closed',
 };
 
 type ActionType = 'inspection' | 'fix' | 'replacement' | 'escalate' | 'confirm' | 'close';
 
 export default function AMTicketsPage() {
-  const [tab, setTab]           = useState<Tab>('action');
+  const [tab, setTab]             = useState<Tab>('action');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [roomFilter, setRoomFilter]     = useState<string>('');
+  const [timeFilter, setTimeFilter]     = useState<TimeFilter>('all');
+  const [sort, setSort]                 = useState<SortOrder>('newest');
   const [expanded, setExpanded]   = useState<string | null>(null);
-  const [notesOpen, setNotesOpen] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState<string | null>(null);
   const [actionModal, setActionModal] = useState<{ ticket: AMTicket; type: ActionType } | null>(null);
   const qc = useQueryClient();
 
@@ -77,6 +104,34 @@ export default function AMTicketsPage() {
     queryFn:  () => listDepartments(undefined, 1, 200),
   });
   const deptOptions = (deptPage?.items ?? []).map(d => ({ value: d.id, label: `${d.name} (${d.handles})` }));
+
+  // Rooms present in the current ticket set — drives the room filter dropdown.
+  const roomOptions = useMemo(() => {
+    const names = Array.from(new Set(tickets.map(t => t.roomName).filter(Boolean))).sort();
+    return [{ value: '', label: 'All rooms' }, ...names.map(n => ({ value: n, label: n }))];
+  }, [tickets]);
+
+  // ── Apply filters + sort (only the "All" tab is filterable) ─────────────────
+  const visibleTickets = useMemo(() => {
+    if (tab === 'action') return tickets;
+    const now = Date.now();
+    const cutoff = timeFilter === 'all' ? 0 : now - Number(timeFilter) * 24 * 60 * 60 * 1000;
+    const filtered = tickets.filter(t => {
+      if (statusFilter === 'needsConfirmation') {
+        if (!NEEDS_CONFIRMATION.has(t.status)) return false;
+      } else if (statusFilter !== 'all') {
+        if (bucketOf(t.status) !== statusFilter) return false;
+      }
+      if (roomFilter && t.roomName !== roomFilter) return false;
+      if (cutoff && +new Date(t.createdAtUtc) < cutoff) return false;
+      return true;
+    });
+    return filtered.sort((a, b) =>
+      sort === 'newest'
+        ? +new Date(b.createdAtUtc) - +new Date(a.createdAtUtc)
+        : +new Date(a.createdAtUtc) - +new Date(b.createdAtUtc),
+    );
+  }, [tickets, tab, statusFilter, roomFilter, timeFilter, sort]);
 
   const { register, handleSubmit, formState: { errors }, reset } =
     useForm<DeptForm>({ resolver: zodResolver(deptSchema) });
@@ -168,6 +223,14 @@ export default function AMTicketsPage() {
     }
   };
 
+  const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
+    { value: 'all',              label: 'All' },
+    { value: 'open',             label: 'Open' },
+    { value: 'inProgress',       label: 'In Progress' },
+    { value: 'needsConfirmation', label: 'Needs Confirmation' },
+    { value: 'closed',           label: 'Closed' },
+  ];
+
   return (
     <div>
       <div className="mb-6">
@@ -181,23 +244,69 @@ export default function AMTicketsPage() {
             className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${
               tab === t ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
             }`}>
-            {t === 'action' ? 'Needs Action' : 'All Tickets'}
+            {t === 'action' ? 'Needs Your Action' : 'All Tickets'}
           </button>
         ))}
       </div>
 
+      {/* Filters — only meaningful on the "All Tickets" tab */}
+      {tab === 'all' && (
+        <div className="mb-5 space-y-3">
+          <div className="flex flex-wrap gap-1.5">
+            {STATUS_FILTERS.map(f => (
+              <button key={f.value} onClick={() => setStatusFilter(f.value)}
+                className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-all ${
+                  statusFilter === f.value
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
+                }`}>
+                {f.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <div className="w-48">
+              <Select options={roomOptions} value={roomFilter}
+                onChange={e => setRoomFilter(e.target.value)} />
+            </div>
+            <div className="w-44">
+              <Select
+                options={[
+                  { value: 'all', label: 'All time' },
+                  { value: '7',   label: 'Last 7 days' },
+                  { value: '30',  label: 'Last 30 days' },
+                ]}
+                value={timeFilter}
+                onChange={e => setTimeFilter(e.target.value as TimeFilter)}
+              />
+            </div>
+            <div className="w-44">
+              <Select
+                options={[
+                  { value: 'newest', label: 'Newest first' },
+                  { value: 'oldest', label: 'Oldest first' },
+                ]}
+                value={sort}
+                onChange={e => setSort(e.target.value as SortOrder)}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       {isLoading ? (
         <div className="space-y-3">{[1,2,3].map(i => <div key={i} className="h-20 bg-gray-100 rounded-xl animate-pulse" />)}</div>
-      ) : tickets.length === 0 ? (
+      ) : visibleTickets.length === 0 ? (
         <div className="py-16 text-center text-gray-400 bg-white rounded-2xl border border-dashed border-gray-200">
           <Ticket size={32} className="mx-auto mb-3 text-gray-300" />
-          <p className="font-medium">{tab === 'action' ? 'No tickets need your action' : 'No tickets yet'}</p>
+          <p className="font-medium">{tab === 'action' ? 'No tickets need your action' : 'No tickets match these filters'}</p>
         </div>
       ) : (
         <div className="space-y-2">
-          {tickets.map((t, i) => {
+          {visibleTickets.map((t, i) => {
             const actions = getActions(t);
             const isExpanded = expanded === t.id;
+            const bucket = bucketOf(t.status);
             return (
               <motion.div key={t.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.03 }}
                 className="bg-white rounded-xl border border-gray-100 overflow-hidden">
@@ -207,22 +316,28 @@ export default function AMTicketsPage() {
                     <p className="text-xs text-gray-400 mt-0.5 truncate">
                       {t.roomName} · Reported by {t.reportedByName}
                       {t.departmentName && ` · ${t.departmentName}`}
+                      <span className="mx-1">·</span>
+                      {new Date(t.createdAtUtc).toLocaleDateString()}
+                      <span className="text-gray-300"> · {STATUS_LABEL[t.status] ?? t.status}</span>
                     </p>
                   </div>
-                  <span className={`text-xs font-medium px-2 py-0.5 rounded-full flex-shrink-0 ${STATUS_COLOR[t.status] ?? 'bg-gray-100 text-gray-500'}`}>
-                    {STATUS_LABEL[t.status] ?? t.status}
+                  {NEEDS_CONFIRMATION.has(t.status) && (
+                    <span className="text-xs font-medium px-2 py-0.5 rounded-full flex-shrink-0 bg-green-100 text-green-700 hidden sm:block">
+                      Needs confirmation
+                    </span>
+                  )}
+                  <span className={`text-xs font-medium px-2 py-0.5 rounded-full flex-shrink-0 ${BUCKET_COLOR[bucket]}`}>
+                    {BUCKET_LABEL[bucket]}
                   </span>
                   {t.currentMaintainerName && (
                     <span className="text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full flex-shrink-0 hidden sm:block">
                       {t.currentMaintainerName}
                     </span>
                   )}
-                  {t.notes.length > 0 && (
-                    <button onClick={() => setNotesOpen(notesOpen === t.id ? null : t.id)}
-                      className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 flex-shrink-0">
-                      <MessageSquare size={13} /> {t.notes.length}
-                    </button>
-                  )}
+                  <button onClick={() => setHistoryOpen(historyOpen === t.id ? null : t.id)}
+                    className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 flex-shrink-0">
+                    <History size={13} /> History{t.notes.length > 0 && ` (${t.notes.length})`}
+                  </button>
                   {actions.length > 0 && (
                     <button onClick={() => setExpanded(isExpanded ? null : t.id)}
                       className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 flex-shrink-0">
@@ -231,23 +346,43 @@ export default function AMTicketsPage() {
                   )}
                 </div>
 
-                {notesOpen === t.id && t.notes.length > 0 && (
-                  <div className="px-4 pb-3 border-t border-gray-50 pt-3 space-y-2">
-                    {t.notes.map(n => (
-                      <div key={n.id} className="text-xs">
-                        <span className={`font-semibold mr-1 ${
-                          n.authorRole === 'Reporter'            ? 'text-blue-600'   :
-                          n.authorRole === 'Maintainer'          ? 'text-orange-600' :
-                          n.authorRole === 'Asset Manager'       ? 'text-green-700'  :
-                          n.authorRole === 'Department Manager'  ? 'text-violet-700' :
-                          'text-gray-700'
-                        }`}>{n.authorRole}:</span>
-                        <span className="font-medium text-gray-700">{n.authorName}</span>
-                        <span className="text-gray-400 mx-1">·</span>
-                        <span className="text-gray-400">{new Date(n.createdAtUtc).toLocaleString()}</span>
-                        <p className="text-gray-600 mt-0.5">{n.content}</p>
-                      </div>
-                    ))}
+                {historyOpen === t.id && (
+                  <div className="px-4 pb-3 border-t border-gray-50 pt-3">
+                    {/* Ticket timeline — reported → every note in chronological order */}
+                    <ol className="relative border-l border-gray-200 ml-1 space-y-3">
+                      <li className="ml-4">
+                        <div className="absolute -left-[5px] mt-1 w-2.5 h-2.5 rounded-full bg-blue-500" />
+                        <p className="text-xs">
+                          <span className="font-semibold text-blue-600 mr-1">Reported</span>
+                          <span className="font-medium text-gray-700">{t.reportedByName}</span>
+                          <span className="text-gray-400 mx-1">·</span>
+                          <span className="text-gray-400">{new Date(t.createdAtUtc).toLocaleString()}</span>
+                        </p>
+                      </li>
+                      {t.notes.map(n => (
+                        <li key={n.id} className="ml-4">
+                          <div className="absolute -left-[5px] mt-1 w-2.5 h-2.5 rounded-full bg-gray-300" />
+                          <p className="text-xs">
+                            <span className={`font-semibold mr-1 ${
+                              n.authorRole === 'Reporter'           ? 'text-blue-600'   :
+                              n.authorRole === 'Maintainer'         ? 'text-orange-600' :
+                              n.authorRole === 'Asset Manager'      ? 'text-green-700'  :
+                              n.authorRole === 'Department Manager' ? 'text-violet-700' :
+                              'text-gray-700'
+                            }`}>{n.authorRole}:</span>
+                            <span className="font-medium text-gray-700">{n.authorName}</span>
+                            <span className="text-gray-400 mx-1">·</span>
+                            <span className="text-gray-400">{new Date(n.createdAtUtc).toLocaleString()}</span>
+                          </p>
+                          <p className="text-gray-600 mt-0.5 text-xs">{n.content}</p>
+                        </li>
+                      ))}
+                    </ol>
+                    {t.notes.length === 0 && (
+                      <p className="text-xs text-gray-400 mt-2 ml-1 flex items-center gap-1">
+                        <MessageSquare size={12} /> No activity yet beyond the initial report.
+                      </p>
+                    )}
                   </div>
                 )}
 
